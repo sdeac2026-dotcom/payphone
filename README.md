@@ -14,6 +14,16 @@ Rust engine · Next.js console · Python oracle · Solidity identity · MIT
 
 </div>
 
+<div align="center">
+
+**🌐 Try it live — no install, no signup: [github-pages demo](https://sdeac2026-dotcom.github.io/payphone/)**
+
+The Pages build runs the full product in your browser (in-browser demo engine:
+onboarding → asset-first invoicing → hosted checkout → SimNet payment → paid).
+Point it at a deployed engine (see `docs/DEPLOYMENT.md`) to settle real funds.
+
+</div>
+
 ---
 
 ## What is this?

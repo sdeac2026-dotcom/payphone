@@ -18,6 +18,14 @@ import type {
   Rate,
   SimBlock,
 } from "./types";
+import demoHandle, { DemoError } from "./demo-engine";
+
+/**
+ * Static-demo build flag (`NEXT_PUBLIC_PAYPHONE_DEMO=1`, used only by the
+ * GitHub-Pages export): every API call is answered by the in-browser demo
+ * engine instead of the wire. Production builds never execute this branch.
+ */
+const DEMO = process.env.NEXT_PUBLIC_PAYPHONE_DEMO === "1";
 
 const API = "";
 
@@ -106,6 +114,14 @@ async function request<T>(
   body?: unknown,
   creds?: { pk: string; sk: string } | null
 ): Promise<T> {
+  if (DEMO) {
+    try {
+      return (await demoHandle(method, path, (body as Record<string, unknown>) ?? null, creds ?? null)) as T;
+    } catch (e) {
+      if (e instanceof DemoError) throw new ApiError("demo_error", e.message, e.status);
+      throw e;
+    }
+  }
   const enginePath = path.startsWith("/v1") ? path : `/v1${path}`;
   const wirePath = `/api${enginePath}`;
   const raw = body !== undefined ? JSON.stringify(body) : null;

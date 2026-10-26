@@ -22,5 +22,10 @@ while true; do
     echo "$(date '+%H:%M:%S') started web" >> "$LOG"
     sleep 2
   fi
+  if ! probe 9099 /payphone/; then
+    ( cd "$ROOT/scripts/pageserve" && setsid nohup python3 serve.py >> "$ROOT/.pageserve.log" 2>&1 < /dev/null & )
+    echo "$(date '+%H:%M:%S') started pageserve" >> "$LOG"
+    sleep 2
+  fi
   sleep 5
 done

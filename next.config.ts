@@ -3,14 +3,22 @@ import type { NextConfig } from "next";
 /**
  * PayPhone web console configuration.
  *
- * - `output: "standalone"` — production deploys run `.next/standalone/server.js`
- *   (≈110 MB RSS) which fits constrained hosts and containers.
+ * - Default: `output: "standalone"` — production deploys run
+ *   `.next/standalone/server.js` (≈110 MB RSS) which fits constrained hosts
+ *   and containers.
+ * - `PAYPHONE_STATIC_EXPORT=1` switches to a fully static export for GitHub
+ *   Pages (the in-browser demo build; see src/lib/payphone/demo-engine.ts).
+ *   Pair it with `PAYPHONE_BASE_PATH=/payphone` for project-page hosting.
  * - `turbopack.memoryLimit` — caps the dev compiler so `next dev` stays within
  *   small sandboxes instead of trading RSS for compile speed until the OOM
  *   killer intervenes.
  */
+const isStaticExport = process.env.PAYPHONE_STATIC_EXPORT === "1";
+
 const nextConfig: NextConfig = {
-  output: "standalone",
+  output: isStaticExport ? "export" : "standalone",
+  basePath: process.env.PAYPHONE_BASE_PATH || undefined,
+  images: isStaticExport ? { unoptimized: true } : undefined,
   typescript: {
     ignoreBuildErrors: true,
   },
