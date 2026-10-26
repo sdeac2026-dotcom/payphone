@@ -1,0 +1,15 @@
+{
+  "name": "@payphone/sdk",
+  "version": "0.1.0",
+  "description": "PayPhone payment network — TypeScript SDK (request signing, invoices, phone identity, webhook verification).",
+  "license": "MIT",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "engines": { "node": ">=18" },
+  "keywords": ["payphone", "crypto", "payments", "stablecoin", "web3", "fintech"],
+  "repository": "https://github.com/your-org/payphone"
+}

@@ -1,0 +1,284 @@
+{
+ "verified": [
+  {
+   "network": "avalanche",
+   "symbol": "GMX",
+   "address": "0x62edc0692bd897d2295872a9ffcac5425011c661",
+   "decimals": 18,
+   "onchain_symbol": "GMX"
+  },
+  {
+   "network": "avalanche",
+   "symbol": "PEPE",
+   "address": "0xa659d083b677d6bffe1cb704e1473b896727be6d",
+   "decimals": 18,
+   "onchain_symbol": "PEPE"
+  },
+  {
+   "network": "avalanche",
+   "symbol": "TUSD",
+   "address": "0x1c20e891bab6b1727d14da358fae2984ed9b59eb",
+   "decimals": 18,
+   "onchain_symbol": "TUSD"
+  },
+  {
+   "network": "avalanche",
+   "symbol": "USDT",
+   "address": "0x9702230a8ea53601f5cd2dc00fdbc13d4df4a8c7",
+   "decimals": 6,
+   "onchain_symbol": "USDt"
+  },
+  {
+   "network": "avalanche",
+   "symbol": "USDt",
+   "address": "0x9702230a8ea53601f5cd2dc00fdbc13d4df4a8c7",
+   "decimals": 6,
+   "onchain_symbol": "USDt"
+  },
+  {
+   "network": "avalanche",
+   "symbol": "WAVAX",
+   "address": "0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7",
+   "decimals": 18,
+   "onchain_symbol": "WAVAX"
+  },
+  {
+   "network": "avalanche",
+   "symbol": "WBTC",
+   "address": "0x0555e30da8f98308edb960aa94c0db47230d2b9c",
+   "decimals": 8,
+   "onchain_symbol": "WBTC"
+  },
+  {
+   "network": "bsc",
+   "symbol": "AAVE",
+   "address": "0xfb6115445bff7b52feb98650c87f44907e58f802",
+   "decimals": 18,
+   "onchain_symbol": "AAVE"
+  },
+  {
+   "network": "bsc",
+   "symbol": "APE",
+   "address": "0x8f86a15ec17cb3369d8b3e666dadbc11daa82b79",
+   "decimals": 18,
+   "onchain_symbol": "APE"
+  },
+  {
+   "network": "bsc",
+   "symbol": "BTCB",
+   "address": "0x7130d2a12b9bcbfae4f2634d864a1ee1ce3ead9c",
+   "decimals": 18,
+   "onchain_symbol": "BTCB"
+  },
+  {
+   "network": "bsc",
+   "symbol": "CAKE",
+   "address": "0x0e09fabb73bd3ade0a17ecc321fd13a19e81ce82",
+   "decimals": 18,
+   "onchain_symbol": "Cake"
+  },
+  {
+   "network": "bsc",
+   "symbol": "COMP",
+   "address": "0x52ce071bd9b1c4b00a0b92d298c512478cad67e8",
+   "decimals": 18,
+   "onchain_symbol": "COMP"
+  },
+  {
+   "network": "bsc",
+   "symbol": "DAI",
+   "address": "0x1af3f329e8be154074d8769d1ffa4ee058b1dbc3",
+   "decimals": 18,
+   "onchain_symbol": "DAI"
+  },
+  {
+   "network": "bsc",
+   "symbol": "FRAX",
+   "address": "0x90c97f71e18723b0cf0dfa30ee176ab653e89f40",
+   "decimals": 18,
+   "onchain_symbol": "FRAX"
+  },
+  {
+   "network": "bsc",
+   "symbol": "GMX",
+   "address": "0xcef8a7008310a15b1b1489d88b0e6fe51329b05a",
+   "decimals": 18,
+   "onchain_symbol": "GMx"
+  },
+  {
+   "network": "bsc",
+   "symbol": "LINK",
+   "address": "0xf8a0bf9cf54bb92f17374d9e9a321e6a111a51bd",
+   "decimals": 18,
+   "onchain_symbol": "LINK"
+  },
+  {
+   "network": "bsc",
+   "symbol": "PEPE",
+   "address": "0x25d887ce7a35172c62febfd67a1856f20faebb00",
+   "decimals": 18,
+   "onchain_symbol": "PEPE"
+  },
+  {
+   "network": "bsc",
+   "symbol": "SHIB",
+   "address": "0x2859e4544c4bb03966803b044a93563bd2d0dd4d",
+   "decimals": 18,
+   "onchain_symbol": "SHIB"
+  },
+  {
+   "network": "bsc",
+   "symbol": "TUSD",
+   "address": "0x14016e85a25aeb13065688cafb43044c2ef86784",
+   "decimals": 18,
+   "onchain_symbol": "TUSD"
+  },
+  {
+   "network": "bsc",
+   "symbol": "UNI",
+   "address": "0xbf5140a22578168fd562dccf235e5d43a02ce9b1",
+   "decimals": 18,
+   "onchain_symbol": "UNI"
+  },
+  {
+   "network": "bsc",
+   "symbol": "USDC",
+   "address": "0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d",
+   "decimals": 18,
+   "onchain_symbol": "USDC"
+  },
+  {
+   "network": "bsc",
+   "symbol": "USDT",
+   "address": "0x524bc91dc82d6b90ef29f76a3ecaabafffd490bc",
+   "decimals": 6,
+   "onchain_symbol": "USDT"
+  },
+  {
+   "network": "bsc",
+   "symbol": "USDt",
+   "address": "0x524bc91dc82d6b90ef29f76a3ecaabafffd490bc",
+   "decimals": 6,
+   "onchain_symbol": "USDT"
+  },
+  {
+   "network": "bsc",
+   "symbol": "WBTC",
+   "address": "0x0555e30da8f98308edb960aa94c0db47230d2b9c",
+   "decimals": 8,
+   "onchain_symbol": "WBTC"
+  },
+  {
+   "network": "optimism",
+   "symbol": "AAVE",
+   "address": "0x76fb31fb4af56892a25e32cfc43de717950c9278",
+   "decimals": 18,
+   "onchain_symbol": "AAVE"
+  },
+  {
+   "network": "optimism",
+   "symbol": "CRV",
+   "address": "0x0994206dfe8de6ec6920ff4d779b0d950605fb53",
+   "decimals": 18,
+   "onchain_symbol": "CRV"
+  },
+  {
+   "network": "optimism",
+   "symbol": "DAI",
+   "address": "0xda10009cbd5d07dd0cecc66161fc93d7c9000da1",
+   "decimals": 18,
+   "onchain_symbol": "DAI"
+  },
+  {
+   "network": "optimism",
+   "symbol": "FRAX",
+   "address": "0x2e3d870790dc77a83dd1d18184acc7439a53f475",
+   "decimals": 18,
+   "onchain_symbol": "FRAX"
+  },
+  {
+   "network": "optimism",
+   "symbol": "GMX",
+   "address": "0xcef8a7008310a15b1b1489d88b0e6fe51329b05a",
+   "decimals": 18,
+   "onchain_symbol": "GMx"
+  },
+  {
+   "network": "optimism",
+   "symbol": "LDO",
+   "address": "0xfdb794692724153d1488ccdbe0c56c252596735f",
+   "decimals": 18,
+   "onchain_symbol": "LDO"
+  },
+  {
+   "network": "optimism",
+   "symbol": "LINK",
+   "address": "0x350a791bfc2c21f9ed5d10980dad2e2638ffa7f6",
+   "decimals": 18,
+   "onchain_symbol": "LINK"
+  },
+  {
+   "network": "optimism",
+   "symbol": "OP",
+   "address": "0x4200000000000000000000000000000000000042",
+   "decimals": 18,
+   "onchain_symbol": "OP"
+  },
+  {
+   "network": "optimism",
+   "symbol": "TUSD",
+   "address": "0xcb59a0a753fdb7491d5f3d794316f1ade197b21e",
+   "decimals": 18,
+   "onchain_symbol": "TUSD"
+  },
+  {
+   "network": "optimism",
+   "symbol": "UNI",
+   "address": "0x6fd9d7ad17242c41f7131d257212c54a0e816691",
+   "decimals": 18,
+   "onchain_symbol": "UNI"
+  },
+  {
+   "network": "optimism",
+   "symbol": "USDC",
+   "address": "0x0b2c639c533813f4aa9d7837caf62653d097ff85",
+   "decimals": 6,
+   "onchain_symbol": "USDC"
+  },
+  {
+   "network": "optimism",
+   "symbol": "USDT",
+   "address": "0x94b008aa00579c1307b0ef2c499ad98a8ce58e58",
+   "decimals": 6,
+   "onchain_symbol": "USDT"
+  },
+  {
+   "network": "optimism",
+   "symbol": "USDt",
+   "address": "0x94b008aa00579c1307b0ef2c499ad98a8ce58e58",
+   "decimals": 6,
+   "onchain_symbol": "USDT"
+  },
+  {
+   "network": "optimism",
+   "symbol": "WBTC",
+   "address": "0x68f180fcce6836688e9084f035309e29bf0a2095",
+   "decimals": 8,
+   "onchain_symbol": "WBTC"
+  },
+  {
+   "network": "optimism",
+   "symbol": "WETH",
+   "address": "0x4200000000000000000000000000000000000006",
+   "decimals": 18,
+   "onchain_symbol": "WETH"
+  },
+  {
+   "network": "optimism",
+   "symbol": "cbETH",
+   "address": "0xaddb6a0412de1ba0f936dcaeb8aaa24578dcf3b2",
+   "decimals": 18,
+   "onchain_symbol": "cbETH"
+  }
+ ]
+}

@@ -1,0 +1,43 @@
+[package]
+name = "payphone-engine"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "PayPhone — stateless crypto payment engine: phone-number identity, universal checkout, revenue routing."
+license = "MIT"
+repository = "https://github.com/your-org/payphone"
+keywords = ["payments", "crypto", "fintech", "stateless", "web3"]
+categories = ["api-bindings", "cryptography::cryptocurrencies"]
+
+[dependencies]
+# HTTP framework
+axum = { version = "0.7", features = ["macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "sync"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+
+# Serialization (preserve_order keeps canonical JSON deterministic across services)
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+
+# Cryptography — HMAC-SHA256 for auth/signatures, SHA-256 for hashing, Keccak for EVM
+hmac = "0.12"
+sha2 = "0.10"
+tiny-keccak = { version = "2", features = ["keccak"] }
+hex = "0.4"
+base64 = "0.22"
+rand = "0.8"
+
+# HTTP client for chain RPC + oracles (rustls: no OpenSSL headaches)
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# Observability & errors
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

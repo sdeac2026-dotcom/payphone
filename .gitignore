@@ -1,0 +1,34 @@
+# dependencies
+node_modules/
+.venv/
+__pycache__/
+*.pyc
+
+# build artifacts
+engine/target/
+.next/
+out/
+dist/
+*.tsbuildinfo
+
+# environment: template yes, real values never
+.env
+.env.local
+.env.*
+!.env.example
+
+# runtime journals & secrets
+*.log
+*.pid
+.data/
+.engine.pid
+.engine.log
+.oracle.log
+.web.log
+.keeper.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
