@@ -16,11 +16,22 @@ Rust engine · Next.js console · Python oracle · Solidity identity · MIT
 
 <div align="center">
 
-**🌐 Try it live — no install, no signup: [github-pages demo](https://sdeac2026-dotcom.github.io/payphone/)**
+**🟢 LIVE — this network is running right now: [payphone-div0.onrender.com](https://payphone-div0.onrender.com)**
 
-The Pages build runs the full product in your browser (in-browser demo engine:
-onboarding → asset-first invoicing → hosted checkout → SimNet payment → paid).
-Point it at a deployed engine (see `docs/DEPLOYMENT.md`) to settle real funds.
+Real chains, real prices, non-custodial settlement straight to merchant
+wallets — 7 EVM mainnets + Bitcoin + Solana + Tron.
+
+- **Paying someone?** You need nothing — open the payment link you were sent,
+  pay from any wallet, done. No signup, no account, no fees for payers.
+- **Want to accept crypto?** Merchant onboarding is operator-gated to keep
+  scammers off the domain — request access at
+  [lex.ecosystem@gmail.com](mailto:lex.ecosystem@gmail.com) and receive your
+  keys.
+- **Just exploring?** Try the [in-browser demo](https://sdeac2026-dotcom.github.io/payphone/)
+  (SimNet toy chain, nothing real moves) or deploy your own node below.
+
+*Node sleeps after ~15 idle minutes on the free tier — first visitor waits
+~50s while it wakes.*
 
 </div>
 
