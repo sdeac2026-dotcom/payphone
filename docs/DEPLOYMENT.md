@@ -3,6 +3,85 @@
 The stack is three processes and a domain. No database, no queue, no
 migrations. This runbook takes you from repo to live payment network.
 
+## 0. One-container deploy — Railway / Render (fastest path to real payments)
+
+The repo ships a production image definition (`Dockerfile`) that runs all
+three processes in one container with **exactly one public port** (the web
+console; the engine and oracle stay on loopback inside the container).
+`railway.json` and `render.yaml` prewire the platform so this is a
+point-and-click deploy.
+
+### Railway (recommended — always-on from the first minute)
+
+1. Push the repo to GitHub, then open
+   [railway.com/new](https://railway.com/new) → **Deploy from GitHub repo**
+   → pick `payphone`. Railway reads `railway.json` (Dockerfile build,
+   `/api/health` healthcheck, restart-on-failure).
+2. In **Variables**, add:
+
+   | Variable | Value |
+   |---|---|
+   | `PAYPHONE_ENV` | `production` |
+   | `PAYPHONE_MASTER_KEY` | `openssl rand -hex 32` |
+   | `PAYPHONE_SIGNING_KEY` | `openssl rand -hex 32` |
+   | `PAYPHONE_PHONE_PEPPER` | `openssl rand -hex 32` |
+   | `PAYPHONE_ADMIN_TOKEN` | `openssl rand -hex 24` |
+   | `PAYPHONE_CHECKOUT_URL` | `https://<your-service>.up.railway.app` (set after the first deploy) |
+   | `PAYPHONE_CORS_ORIGINS` | `https://<your-service>.up.railway.app` |
+
+3. **Settings → Networking → Generate Domain** → your public URL. Every
+   payment link the engine mints now points at this domain
+   (`PAYPHONE_CHECKOUT_URL`), and hosted checkout pages are served by the
+   same deployment.
+4. Deploy → watch the build (first build compiles the Rust engine, ~5–8 min;
+   subsequent builds reuse the cargo cache mount).
+
+### Render (alternative — use the paid plan for payments)
+
+Render's free plan sleeps after 15 idle minutes — unacceptable for a
+checkout link. `render.yaml` pins `plan: starter` and generates all four
+secrets at apply time:
+
+1. Render Dashboard → **New → Blueprint** → point at the repo → **Apply**.
+2. After the first deploy, set `PAYPHONE_CHECKOUT_URL` +
+   `PAYPHONE_CORS_ORIGINS` to your service URL (`https://payphone.onrender.com`
+   or a custom domain) → **Manual Deploy** to apply.
+
+### First real-money run (both platforms)
+
+1. Open the dashboard → **Create your merchant account**. The deployment is
+   admin-gated: paste your `PAYPHONE_ADMIN_TOKEN` once when prompted — it is
+   remembered in your browser and sent as `X-Admin-Token` on key issuance.
+2. Enter your real wallet address (the one that must receive funds —
+   settlement is non-custodial, funds never touch PayPhone).
+3. Create an invoice in a **real asset** (USDC on Base, ETH, BTC, SOL, …),
+   share the hosted checkout link, pay a small real amount from any wallet,
+   watch the invoice flip to **paid** with an on-chain receipt.
+4. Verify `GET /api/health` → `{"web":true,"engine":true,"oracle":true}` and
+   `GET /api/v1/chains` → every network `rpc_live: true`.
+
+All seven EVM mainnets + Bitcoin + Solana + Tron ship enabled on public RPC
+endpoints — zero extra config to start. For production volume, override
+`EVM_RPC_*` / `SOL_RPC_URL` / `TRON_API_BASE` with indexed providers
+(Alchemy, QuickNode, Helius); see the matrix below.
+
+### Other Docker hosts
+
+```bash
+docker build -t payphone .
+docker run -p 8080:8080 --env-file .env \
+  -e PORT=8080 \
+  -e PAYPHONE_ENV=production \
+  -e PAYPHONE_MASTER_KEY=$(openssl rand -hex 32) \
+  -e PAYPHONE_SIGNING_KEY=$(openssl rand -hex 32) \
+  -e PAYPHONE_PHONE_PEPPER=$(openssl rand -hex 32) \
+  -e PAYPHONE_ADMIN_TOKEN=$(openssl rand -hex 24) \
+  -e PAYPHONE_CHECKOUT_URL=https://pay.yourdomain.com \
+  payphone
+```
+
+Fly.io, Coolify, Dokku, any VPS with Docker — same image, same envs.
+
 ## 1. Build
 
 ```bash

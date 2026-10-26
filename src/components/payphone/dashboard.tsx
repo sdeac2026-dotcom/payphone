@@ -24,7 +24,8 @@ import {
   Trash2, TrendingUp, Webhook, Zap,
 } from "lucide-react";
 import {
-  api, invoiceStore, session as store, shortHash, usd,
+  api, invoiceStore, session as store, setAdminToken, shortHash, usd,
+  ApiError,
   type MerchantSession,
 } from "@/lib/payphone/api";
 import type { EngineHealth, FeeSchedule, LocalInvoice } from "@/lib/payphone/types";
@@ -179,7 +180,22 @@ function Onboarding({ onDone }: { onDone: (m: MerchantSession) => void }) {
   async function generate() {
     setBusy(true);
     try {
-      const key = await api.issueKey(tier);
+      let key: Awaited<ReturnType<typeof api.issueKey>>;
+      try {
+        key = await api.issueKey(tier);
+      } catch (e) {
+        // Production deployments gate key issuance behind the platform admin
+        // token (PAYPHONE_ADMIN_TOKEN). Ask once, remember, retry.
+        const gated = e instanceof ApiError && (e.status === 403 || e.type === "forbidden");
+        if (!gated || typeof window === "undefined") throw e;
+        const token = window.prompt(
+          "This PayPhone deployment is admin-gated.\n" +
+            "Enter the platform admin token (PAYPHONE_ADMIN_TOKEN) to issue merchant keys:"
+        );
+        if (!token) throw e;
+        setAdminToken(token);
+        key = await api.issueKey(tier);
+      }
       const pk = key.public_key;
       const sk = key.secret_key;
       const w = wallet.trim() || "PP" + Array.from({ length: 40 }, () => "0123456789abcdef"[Math.floor(Math.random() * 16)]).join("");

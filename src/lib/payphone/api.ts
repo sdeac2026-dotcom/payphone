@@ -108,11 +108,38 @@ function transportPath(path: string): string {
  * - The SIGNATURE canonical string always uses the ENGINE path (`/v1/…`),
  *   because that is what the engine verifies against.
  */
+/**
+ * Platform admin token (`PAYPHONE_ADMIN_TOKEN`).
+ *
+ * Production deployments gate `POST /v1/keys` behind an admin token so only
+ * the platform operator can mint merchant credentials. The operator pastes
+ * the token once in the dashboard; it is kept in localStorage and sent as
+ * `X-Admin-Token` on key issuance. It never touches merchant signatures.
+ */
+const ADMIN_TOKEN_STORAGE = "payphone_admin_token";
+
+export function setAdminToken(token: string): void {
+  try {
+    localStorage.setItem(ADMIN_TOKEN_STORAGE, token.trim());
+  } catch {
+    /* storage unavailable (private mode) — token is session-only then */
+  }
+}
+
+export function getAdminToken(): string | null {
+  try {
+    return localStorage.getItem(ADMIN_TOKEN_STORAGE);
+  } catch {
+    return null;
+  }
+}
+
 async function request<T>(
   method: string,
   path: string,
   body?: unknown,
-  creds?: { pk: string; sk: string } | null
+  creds?: { pk: string; sk: string } | null,
+  extraHeaders?: Record<string, string>
 ): Promise<T> {
   if (DEMO) {
     try {
@@ -126,6 +153,7 @@ async function request<T>(
   const wirePath = `/api${enginePath}`;
   const raw = body !== undefined ? JSON.stringify(body) : null;
   const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (extraHeaders) Object.assign(headers, extraHeaders);
   if (creds) Object.assign(headers, await signRequest(method, enginePath, raw, creds));
   const resp = await fetch(transportPath(wirePath), {
     method,
@@ -191,7 +219,16 @@ export const api = {
 
   // ------------------------------------------------------------ merchant ----
 
-  issueKey: (tier: string) => request<KeyIssue>("POST", "/keys", { tier }),
+  issueKey: (tier: string) => {
+    const admin = getAdminToken();
+    return request<KeyIssue>(
+      "POST",
+      "/keys",
+      { tier },
+      null,
+      admin ? { "X-Admin-Token": admin } : undefined
+    );
+  },
 
   createInvoice: (
     input: {

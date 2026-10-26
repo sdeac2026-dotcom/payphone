@@ -1,0 +1,54 @@
+# PayPhone docker build context — keep it source-only, fast, and leak-free.
+# Build stages copy exactly what they need; everything here is excluded from
+# the context to keep builds fast and secrets out of the image.
+
+# --- secrets & local env (NEVER ship these) ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# --- version control & platform ---
+.git
+.github
+.gh-stage
+.gitignore
+
+# --- build artifacts (rebuilt inside Docker) ---
+node_modules
+.next
+out
+engine/target
+engine/*.log
+next-env.d.ts
+dev.log
+server.log
+
+# --- sandbox / local runtime files ---
+*.log
+.keeper.log
+.engine.log
+.web.log
+.oracle.log
+.pageserve.log
+.rustup-install.log
+logs/
+tmp/
+pid/
+*.pid
+simnet.jsonl
+simnet.jsonl.*
+
+# --- non-deploy content (docs ship from the repo, not the runtime image) ---
+download
+upload
+tool-results
+skills
+scripts/__pycache__
+docs
+LICENSE
+CONTRIBUTING.md
+ARCHITECTURE.md
+worklog.md

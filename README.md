@@ -24,6 +24,19 @@ Point it at a deployed engine (see `docs/DEPLOYMENT.md`) to settle real funds.
 
 </div>
 
+<div align="center">
+
+**💸 Go live with real money in one click:**
+
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/new/template?template=https://github.com/sdeac2026-dotcom/payphone)
+
+One Docker container, one public port, all 10 real networks enabled
+(7 EVM mainnets + Bitcoin + Solana + Tron). Set 5 env vars, deploy, share
+payment links. Full runbook: [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) ·
+Render blueprint: [`render.yaml`](render.yaml)
+
+</div>
+
 ---
 
 ## What is this?
