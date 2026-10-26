@@ -8,10 +8,11 @@
 # PAYPHONE_CHECKOUT_URL is unset — so payment links automatically point at
 # your Render URL (e.g. https://payphone.onrender.com).
 #
-# Real-money note: the Free plan sleeps after ~15 idle minutes — a sleeping
-# checkout page is unacceptable for live payments. `plan: starter` keeps it
-# always on; switch to `free` in the deploy form if you are still testing
-# and upgrade before real volume.
+# Real-money note: the Free plan sleeps after ~15 idle minutes — the next
+# visitor waits ~50s while the service wakes. That's fine for testing;
+# when you go live, upgrade WITHOUT touching this repo:
+#   Render Dashboard → payphone → Settings → Instance Type → Starter/Standard
+# (instant, no redeploy, no code change).
 #
 # Optional hardening AFTER the first deploy (Environment tab):
 #   PAYPHONE_CHECKOUT_URL  = your canonical public URL (custom domains)
@@ -22,7 +23,7 @@ services:
     name: payphone
     runtime: docker
     dockerfilePath: ./Dockerfile
-    plan: starter
+    plan: free   # $0, no card needed. Upgrade to Starter in the dashboard when going live.
     autoDeploy: true
     healthCheckPath: /api/health
     envVars:
