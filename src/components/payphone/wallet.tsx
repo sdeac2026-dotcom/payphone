@@ -31,6 +31,7 @@ import {
   KeyRound, Lock, Plus, Send, ShieldCheck, Trash2, Wallet as WalletIcon,
 } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
+import { SendRightNotice } from "./asset-safety";
 import {
   WALLET_CHAINS, activityLog, feePreview, walletAddress, walletAddressStored,
   walletBalances, walletCreate, walletDestroy, walletExists,
@@ -376,6 +377,7 @@ function WalletMain({ prefill, onChanged }: { prefill?: WalletPrefill; onChanged
               <span className="flex-1" />
               <Button size="sm" variant="ghost" onClick={() => { walletLock(); onChanged(); }}><Lock className="mr-1.5 h-3.5 w-3.5" /> Lock</Button>
             </div>
+            <SendRightNotice />
           </div>
         </CardContent>
       </Card>
@@ -414,6 +416,7 @@ function WalletMain({ prefill, onChanged }: { prefill?: WalletPrefill; onChanged
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base"><Send className="h-4 w-4 text-primary" /> Send</CardTitle>
             <p className="text-sm text-muted-foreground">To a phone number (fee-free PayPhone loop) or any 0x… address (0.5% protocol fee → treasury).</p>
+            <p className="text-xs text-muted-foreground">Public-network sends are final — double-check the recipient and the network before you sign.</p>
           </CardHeader>
           <CardContent className="space-y-3">
             <div className="space-y-1.5">

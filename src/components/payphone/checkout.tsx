@@ -24,6 +24,7 @@ import {
   Phone, ShieldCheck, Smartphone, TriangleAlert, Wallet,
 } from "lucide-react";
 import { api, shortHash, usd } from "@/lib/payphone/api";
+import { SendRightNotice } from "./asset-safety";
 import { WALLET_CHAINS, walletAddress, walletIsUnlocked } from "@/lib/payphone/wallet";
 import type { InvoiceWithStatus } from "@/lib/payphone/types";
 import { Logo, MonoValue } from "./bits";
@@ -264,6 +265,9 @@ export function Checkout({ invoiceId, token }: { invoiceId: string; token: strin
                       </p>
                     )}
                   </div>
+
+                  {/* Asset safety — the #1 loss vector is wrong-network transfers */}
+                  <SendRightNotice asset={invoice!.asset} network={invoice!.network} />
 
                   {/* Wallet pay — real EVM chains, wallet unlocked, network supported */}
                   {!isSimnet && walletIsUnlocked() && WALLET_CHAINS.some((c) => c.name === invoice!.network) && (

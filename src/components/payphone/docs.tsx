@@ -11,6 +11,7 @@ import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { cn } from "@/lib/utils";
 import { CodeBlock } from "./bits";
+import { SendRightNotice } from "./asset-safety";
 
 const SECTIONS = [
   { id: "quickstart", label: "Quickstart" },
@@ -20,6 +21,7 @@ const SECTIONS = [
   { id: "webhooks", label: "Webhooks" },
   { id: "fees", label: "Fees & revenue" },
   { id: "chains", label: "Chains & adapters" },
+  { id: "safety", label: "Asset safety" },
   { id: "oracle", label: "Oracle service" },
   { id: "sdks", label: "SDKs" },
   { id: "errors", label: "Errors & rate limits" },
@@ -68,6 +70,7 @@ export function Docs({ onOpenDashboard }: { onOpenDashboard: () => void }) {
         <Webhooks />
         <Fees />
         <Chains />
+        <Safety />
         <Oracle />
         <Sdks />
         <Errors />
@@ -286,6 +289,48 @@ PAYPHONE_SIMNET=0`} />
     </section>
   );
 }
+
+function Safety() {
+  return (
+    <section className="space-y-4">
+      <H id="safety">Asset safety</H>
+      <P>
+        Public blockchain transfers are final — there is no reversal, no chargeback and no support
+        ticket that can recover coins sent to the wrong place. Nearly every lost-funds report in
+        crypto traces back to one mistake: sending a coin on a network where it does not live.
+        PayPhone ships this guidance at every point where money moves — the landing page, every
+        hosted checkout and the wallet — and repeats the essential rule here.
+      </P>
+      <div className="rounded-xl border border-primary/40 bg-primary/5 p-4 text-sm">
+        <p className="font-semibold text-foreground">The golden rule</p>
+        <p className="mt-1 leading-relaxed text-muted-foreground">
+          Send a coin only on a network where that coin lives, and match the address type to the
+          network. Every exchange labels the network on its withdrawal form — read it, match it,
+          and when in doubt send a small test amount first.
+        </p>
+      </div>
+      <P>
+        <strong>What a 0x… address receives safely:</strong> ETH, USDC, USDT, USDT0, WLD and any
+        other token on Ethereum, Base, Worldchain, Arbitrum, Optimism, Polygon, BNB Chain and
+        Avalanche — sent from any exchange or wallet on Earth. <strong>What it can never
+        receive:</strong> native Bitcoin (bc1…), Solana or Tron coins — entirely different address
+        systems, and cross-system transfers are unrecoverable by anyone. PayPhone invoices on
+        those chains generate the correct per-chain addresses automatically.
+      </P>
+      <P>
+        <strong>Wrong EVM network is usually not lost:</strong> an 0x… address exists on every EVM
+        network, so USDC sent on Polygon instead of Base is still yours — switch networks in any
+        wallet to see it. Tokens not yet listed in the wallet UI also still arrive at the address;
+        any wallet holding the same recovery phrase will show them.
+      </P>
+      <SendRightNotice />
+      <P>
+        And because PayPhone is non-custodial: the recovery phrase is the only key to the funds.
+        We cannot see it, store it, or reset it. Write it down, keep it offline, and share it with
+        no one.
+      </P>
+    </section>
+  );}
 
 function Oracle() {
   return (

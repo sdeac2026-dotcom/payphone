@@ -16,6 +16,7 @@ import {
   Layers, Lock, Radio, ShieldCheck, Smartphone, Timer, TrendingUp, Wallet, Zap,
 } from "lucide-react";
 import { CodeBlock, FeeDonut, MonoValue, SectionHead } from "./bits";
+import { AssetSafetySection } from "./asset-safety";
 import type { FeeSchedule } from "@/lib/payphone/types";
 
 /**
@@ -239,6 +240,9 @@ export function Landing({ onOpenDashboard, onOpenDocs }: { onOpenDashboard: () =
           </Card>
         </div>
       </section>
+
+      {/* ---------------------------------------------------- asset safety */}
+      <AssetSafetySection />
 
       {/* ------------------------------------------------------ how it works */}
       <section className="border-b py-16 sm:py-20">
