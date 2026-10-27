@@ -614,7 +614,7 @@ async fn list_chains(State(state): Ctx) -> ApiResult<Response> {
             .iter()
             .find(|(n, _url)| n == net.name)
             .map(|(_, url)| {
-                if url == net.public_rpc {
+                if url == net.public_rpcs[0] {
                     "default-public"
                 } else {
                     "custom"

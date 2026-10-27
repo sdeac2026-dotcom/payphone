@@ -15,17 +15,22 @@
 //!   [`registry`]) — an unconfirmed transfer keeps the invoice `pending`,
 //!   never falsely `paid`.
 //!
-//! RPC economics: default endpoints are public infrastructure and rate-limit
-//! aggressively. Logs are queried in bounded chunks and only for the invoice
-//! window; for production volume set `EVM_RPC_<NETWORK>` to a dedicated
-//! provider (Alchemy, QuickNode, PublicNode, Ankr…).
+//! RPC economics ("reads are free" engineering): every network carries a
+//! **pool** of verified free public gateways (see [`registry`]). This adapter
+//! round-robins across the pool, benches a gateway that throttles (120 s) or
+//! 5xx-es (30 s), and fails over to the next one automatically — no single
+//! free tier can take a network down. Idempotent reads are also cached for a
+//! short TTL, collapsing poll storms into a fraction of the request volume.
+//! For heavy volume, set `EVM_RPC_<NETWORK>` to a dedicated provider
+//! (Alchemy, QuickNode, PublicNode, Ankr…): it becomes the primary and the
+//! free pool remains behind it as fallbacks.
 
 use crate::chains::registry;
 use crate::error::{ApiResult, AppError};
 use crate::invoice::Invoice;
 use serde_json::json;
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// `Transfer(address,address,uint256)` — keccak256 of the canonical signature.
 pub const TRANSFER_TOPIC: &str = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
@@ -37,13 +42,150 @@ const LOG_CHUNK: u64 = 2_000;
 /// on the fastest chain here; invoices expire long before this).
 const LOG_WINDOW_CAP: u64 = 100_000;
 
-/// Watch adapter for one or more EVM networks. Cheaply cloneable
-/// (`Arc` over the RPC map; the reqwest client is internally `Arc`).
+/// Watch adapter for one or more EVM networks. Cheaply cloneable (`Arc`
+/// over the gateway pools + read cache; the reqwest client is `Arc`).
 #[derive(Clone)]
 pub struct EvmAdapter {
-    /// network name → RPC URL (operator overrides / default public RPCs)
-    rpcs: std::sync::Arc<HashMap<String, String>>,
+    /// network name → gateway pool (operator primary + verified publics)
+    pools: std::sync::Arc<std::sync::Mutex<HashMap<String, NetworkPool>>>,
+    /// idempotent-read cache (see [`cache_ttl`])
+    cache: std::sync::Arc<std::sync::Mutex<HashMap<String, CacheEntry>>>,
     http: reqwest::Client,
+}
+
+/// One RPC gateway plus its health state.
+#[derive(Debug, Clone)]
+struct Gateway {
+    url: String,
+    /// Operator-configured primary (from `EVM_RPC_<NETWORK>`). Rotates with
+    /// the pool like any other member — primaries are not above benching.
+    #[allow(dead_code)]
+    primary: bool,
+    /// While set, the gateway sits at the back of the candidate order and
+    /// is revived only if every healthy gateway fails.
+    cooldown_until: Option<Instant>,
+}
+
+impl Gateway {
+    fn benched(&self, now: Instant) -> bool {
+        self.cooldown_until.map(|t| t > now).unwrap_or(false)
+    }
+}
+
+/// Per-network pool of gateways with a round-robin cursor.
+#[derive(Debug, Clone, Default)]
+struct NetworkPool {
+    gateways: Vec<Gateway>,
+    /// Next gateway to try first (load spreading across the pool).
+    cursor: usize,
+}
+
+impl NetworkPool {
+    /// Candidate indexes, best-first: healthy gateways rotating from the
+    /// cursor, then benched ones (revival as last resort). Pure — unit
+    /// tested without any I/O.
+    fn candidate_order(&self, now: Instant) -> Vec<usize> {
+        let n = self.gateways.len();
+        let mut healthy = Vec::with_capacity(n);
+        let mut benched = Vec::new();
+        for k in 0..n {
+            let i = (self.cursor + k) % n;
+            if self.gateways[i].benched(now) {
+                benched.push(i);
+            } else {
+                healthy.push(i);
+            }
+        }
+        healthy.extend(benched);
+        healthy
+    }
+
+    fn bench(&mut self, idx: usize, secs: u64, now: Instant) {
+        if let Some(g) = self.gateways.get_mut(idx) {
+            g.cooldown_until = Some(now + Duration::from_secs(secs));
+        }
+    }
+
+    fn note_success(&mut self, idx: usize) {
+        if let Some(g) = self.gateways.get_mut(idx) {
+            g.cooldown_until = None;
+        }
+        if !self.gateways.is_empty() {
+            self.cursor = (idx + 1) % self.gateways.len();
+        }
+    }
+}
+
+/// How long a gateway sits out after a failure, by failure class.
+/// Rate limiting is the expensive signal on a shared free tier → 120 s.
+/// Server hiccups recover in seconds → 30 s. `None` = the gateway answered
+/// with a well-formed chain-level response — a real answer, not benched.
+fn bench_seconds(status: u16, rpc_msg: &str) -> Option<u64> {
+    let m = rpc_msg.to_lowercase();
+    if m.contains("limit") || m.contains("rate") {
+        return Some(120);
+    }
+    match status {
+        429 | 402 => Some(120),
+        500..=599 => Some(30),
+        _ => None,
+    }
+}
+
+/// A gateway that could not even complete a transport round trip sits out
+/// only briefly — usually a local blip, not the gateway's fault.
+const TRANSPORT_BENCH_SECS: u64 = 10;
+/// Distinct gateways tried per `rpc()` call. With verified pools of 2–5,
+/// three consecutive failures means the whole network is unreachable.
+const MAX_RPC_ATTEMPTS: usize = 3;
+
+/// A cached read result with expiry (see [`cache_ttl`]).
+#[derive(Debug, Clone)]
+struct CacheEntry {
+    value: serde_json::Value,
+    expires: Instant,
+}
+
+/// Cache TTL per idempotent read method. Fresh enough for payment detection
+/// (confirmations measure in seconds), strong enough to collapse duplicate
+/// polling to near zero. Everything else — logs, receipts, sends — is never
+/// cached.
+fn cache_ttl(method: &str) -> Option<Duration> {
+    match method {
+        "eth_blockNumber" => Some(Duration::from_millis(1_000)),
+        "eth_getBalance" | "eth_call" => Some(Duration::from_millis(2_000)),
+        _ => None,
+    }
+}
+
+/// Cache upper bound (per process). Keys are per network/method/params;
+/// when full, expired entries are dropped first.
+const CACHE_CAP: usize = 4_096;
+
+/// Pure pool construction: each configured network gets its operator
+/// primary (or the registry's default gateway) plus every verified public
+/// gateway as a free fallback. The `mainnet` legacy alias inherits
+/// Ethereum's fallback pool — same chain, same gateways. Unit-testable
+/// without any network stack.
+fn build_pools(rpcs: Vec<(String, String)>) -> HashMap<String, NetworkPool> {
+    let mut pools: HashMap<String, NetworkPool> = HashMap::new();
+    for (network, url) in rpcs {
+        let fallback_of = if network == "mainnet" { "ethereum" } else { network.as_str() };
+        let mut gateways = vec![Gateway { url: url.clone(), primary: true, cooldown_until: None }];
+        if let Some(spec) = registry::find(fallback_of) {
+            for u in spec.public_rpcs {
+                if *u != url {
+                    gateways.push(Gateway {
+                        url: (*u).to_string(),
+                        primary: false,
+                        cooldown_until: None,
+                    });
+                }
+            }
+        }
+        pools.insert(network, NetworkPool { gateways, cursor: 0 });
+    }
+    pools
 }
 
 /// Minimal ERC-20 metadata the engine needs (decimals exposed for adapters).
@@ -88,69 +230,153 @@ impl EvmAdapter {
             .user_agent(concat!("PayPhone-Engine/", env!("CARGO_PKG_VERSION")))
             .build()
             .expect("reqwest client");
-        Some(EvmAdapter { rpcs: std::sync::Arc::new(rpcs.into_iter().collect()), http })
+        let pools = build_pools(rpcs);
+        Some(EvmAdapter {
+            pools: std::sync::Arc::new(std::sync::Mutex::new(pools)),
+            cache: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+            http,
+        })
     }
 
     /// Access the configured networks (for diagnostics) — public adapter API.
     #[allow(dead_code)]
     pub fn networks(&self) -> Vec<String> {
-        self.rpcs.keys().cloned().collect()
+        self.pools.lock().expect("rpc pool lock").keys().cloned().collect()
     }
 
     pub fn has_network(&self, network: &str) -> bool {
-        self.rpcs.contains_key(network)
+        self.pools.lock().expect("rpc pool lock").contains_key(network)
     }
 
-    /// Raw JSON-RPC call with one retry on transport error (public RPCs
-    /// occasionally hiccup; the call is idempotent).
-    async fn rpc(&self, network: &str, method: &str, params: serde_json::Value) -> ApiResult<serde_json::Value> {
-        let url = self
-            .rpcs
-            .get(network)
-            .ok_or_else(|| AppError::unavailable(format!("no RPC for network '{network}'")))?;
+    /// Raw JSON-RPC call across the network's gateway pool: round-robin
+    /// start, bench-on-throttle, automatic failover to the next verified
+    /// gateway, and a short-TTL cache in front of idempotent reads. The
+    /// pool lock is never held across `.await`.
+    async fn rpc(
+        &self,
+        network: &str,
+        method: &str,
+        params: serde_json::Value,
+    ) -> ApiResult<serde_json::Value> {
+        // ---- read cache ---------------------------------------------------
+        let key = format!("{network}|{method}|{}", params.to_string());
+        if let Some(ttl) = cache_ttl(method) {
+            if let Some(v) = self.cache_get(&key) {
+                return Ok(v);
+            }
+        }
+
+        // ---- ordered candidates -------------------------------------------
+        let candidates: Vec<(usize, String)> = {
+            let mut pools = self.pools.lock().expect("rpc pool lock");
+            let pool = pools.get_mut(network).ok_or_else(|| {
+                AppError::unavailable(format!("no RPC for network '{network}'"))
+            })?;
+            pool.candidate_order(Instant::now())
+                .into_iter()
+                .take(MAX_RPC_ATTEMPTS)
+                .map(|i| (i, pool.gateways[i].url.clone()))
+                .collect()
+        };
+
+        // ---- attempt loop --------------------------------------------------
         let payload = json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
         let mut last_err: Option<String> = None;
-        for attempt in 0..2 {
+        for (attempt, (idx, url)) in candidates.iter().enumerate() {
             if attempt > 0 {
                 tokio::time::sleep(Duration::from_millis(400)).await;
             }
+            let host = url.split("//").nth(1).unwrap_or(url).to_string();
+            let bench_it = |pools: &mut HashMap<String, NetworkPool>, secs: u64| {
+                if let Some(p) = pools.get_mut(network) {
+                    p.bench(*idx, secs, Instant::now());
+                }
+            };
             let resp = match self.http.post(url).json(&payload).send().await {
                 Ok(r) => r,
                 Err(e) => {
-                    last_err = Some(format!("rpc {method} failed: {e}"));
+                    last_err = Some(format!("rpc {method} failed via {host}: {e}"));
+                    let mut pools = self.pools.lock().expect("rpc pool lock");
+                    bench_it(&mut pools, TRANSPORT_BENCH_SECS);
                     continue;
                 }
             };
-            // 402/429/5xx from shared gateways → surface a precise hint.
+            // 402/429/5xx from shared gateways → bench + fail over.
             let status = resp.status();
+            if !status.is_success() {
+                let secs = bench_seconds(status.as_u16(), "").unwrap_or(TRANSPORT_BENCH_SECS);
+                last_err = Some(format!(
+                    "rpc {method} HTTP {status} from {host} on '{network}' — set EVM_RPC_{} to a dedicated provider",
+                    network.to_uppercase().replace('-', "_")
+                ));
+                let mut pools = self.pools.lock().expect("rpc pool lock");
+                bench_it(&mut pools, secs);
+                continue;
+            }
             let body: serde_json::Value = match resp.json().await {
                 Ok(b) => b,
                 Err(e) => {
-                    last_err = Some(if status.is_success() {
-                        format!("rpc decode: {e}")
-                    } else {
-                        format!(
-                            "rpc {method} HTTP {status} from '{network}' — public endpoint rate limit? \
-                             set EVM_RPC_{} to a dedicated provider",
-                            network.to_uppercase().replace('-', "_")
-                        )
-                    });
+                    last_err = Some(format!("rpc decode from {host}: {e}"));
+                    let mut pools = self.pools.lock().expect("rpc pool lock");
+                    bench_it(&mut pools, TRANSPORT_BENCH_SECS);
                     continue;
                 }
             };
             if let Some(err) = body["error"].as_object() {
                 let msg = err["message"].as_str().unwrap_or("unknown").to_string();
-                let hint = if msg.contains("limit") || msg.contains("rate") {
-                    format!(" — set EVM_RPC_{} to a dedicated provider",
-                            network.to_uppercase().replace('-', "_"))
-                } else {
-                    String::new()
-                };
-                return Err(AppError::upstream(format!("rpc error: {msg}{hint}")));
+                // Throttling / quota errors are gateway problems → bench and
+                // try the next free gateway. Chain-level errors (revert, …)
+                // are real answers — surface them without failover.
+                if let Some(secs) = bench_seconds(status.as_u16(), &msg) {
+                    last_err = Some(format!("rpc {method} throttled by {host} ({msg})"));
+                    let mut pools = self.pools.lock().expect("rpc pool lock");
+                    bench_it(&mut pools, secs);
+                    continue;
+                }
+                return Err(AppError::upstream(format!("rpc error: {msg}")));
             }
-            return Ok(body["result"].clone());
+            let result = body["result"].clone();
+            {
+                let mut pools = self.pools.lock().expect("rpc pool lock");
+                if let Some(p) = pools.get_mut(network) {
+                    p.note_success(*idx);
+                }
+            }
+            if let Some(ttl) = cache_ttl(method) {
+                self.cache_put(key, result.clone(), ttl);
+            }
+            return Ok(result);
         }
-        Err(AppError::upstream(last_err.unwrap_or_else(|| "rpc failed".into())))
+
+        Err(AppError::upstream(format!(
+            "{} — all fallbacks exhausted; set EVM_RPC_{} to a dedicated provider",
+            last_err.unwrap_or_else(|| "rpc failed".into()),
+            network.to_uppercase().replace('-', "_")
+        )))
+    }
+
+    fn cache_get(&self, key: &str) -> Option<serde_json::Value> {
+        let mut cache = self.cache.lock().expect("rpc cache lock");
+        match cache.get(key) {
+            Some(e) if e.expires > Instant::now() => Some(e.value.clone()),
+            Some(_) => {
+                cache.remove(key);
+                None
+            }
+            None => None,
+        }
+    }
+
+    fn cache_put(&self, key: String, value: serde_json::Value, ttl: Duration) {
+        let mut cache = self.cache.lock().expect("rpc cache lock");
+        if cache.len() >= CACHE_CAP {
+            let now = Instant::now();
+            cache.retain(|_, e| e.expires > now);
+        }
+        if cache.len() >= CACHE_CAP {
+            cache.clear(); // absolute bound; repopulates on the next cycle
+        }
+        cache.insert(key, CacheEntry { value, expires: Instant::now() + ttl });
     }
 
     /// Current balance of `wallet` in token base units.
@@ -476,5 +702,138 @@ mod tests {
     fn registry_drives_confirmations() {
         let inv = sample(); // network = base
         assert_eq!(registry::find(&inv.network).unwrap().confirmations, 8);
+    }
+
+    // ------------------------------------------------------------ rpc mesh --
+
+    fn pool_of(urls: &[&str]) -> NetworkPool {
+        NetworkPool {
+            gateways: urls
+                .iter()
+                .map(|u| Gateway { url: (*u).to_string(), primary: false, cooldown_until: None })
+                .collect(),
+            cursor: 0,
+        }
+    }
+
+    fn order_urls(p: &NetworkPool, now: Instant) -> Vec<String> {
+        p.candidate_order(now).into_iter().map(|i| p.gateways[i].url.clone()).collect()
+    }
+
+    #[test]
+    fn candidate_order_rotates_from_cursor() {
+        let mut p = pool_of(&["a", "b", "c"]);
+        p.cursor = 1;
+        let now = Instant::now();
+        assert_eq!(order_urls(&p, now), vec!["b", "c", "a"]);
+        // note_success advances the cursor past the gateway that answered
+        p.note_success(1);
+        assert_eq!(p.cursor, 2);
+        assert_eq!(order_urls(&p, now), vec!["c", "a", "b"]);
+    }
+
+    #[test]
+    fn benched_gateway_fails_over_then_recovers() {
+        let mut p = pool_of(&["a", "b", "c"]);
+        let now = Instant::now();
+        p.bench(0, 120, now); // 'a' just throttled us
+        // healthy gateways first, benched one only as last resort
+        assert_eq!(order_urls(&p, now), vec!["b", "c", "a"]);
+        // success on a healthy gateway clears its bench and rotates
+        p.note_success(1);
+        assert!(!p.gateways[1].benched(now));
+        assert_eq!(p.cursor, 2);
+        // after the cooldown elapses the benched gateway is healthy again
+        let later = now + Duration::from_secs(121);
+        assert!(!p.gateways[0].benched(later));
+        assert!(p.gateways[0].benched(now));
+    }
+
+    #[test]
+    fn all_benched_pool_still_yields_revival_order() {
+        let mut p = pool_of(&["a", "b"]);
+        let now = Instant::now();
+        p.bench(0, 120, now);
+        p.bench(1, 120, now);
+        // better to retry benched gateways than to fail without trying
+        assert_eq!(p.candidate_order(now).len(), 2);
+    }
+
+    #[test]
+    fn bench_seconds_classifies_failures() {
+        assert_eq!(bench_seconds(429, ""), Some(120));
+        assert_eq!(bench_seconds(402, ""), Some(120));
+        assert_eq!(bench_seconds(503, ""), Some(30));
+        // HTTP 200 but a rate-limit message in the JSON-RPC error body
+        assert_eq!(bench_seconds(200, "request limit reached"), Some(120));
+        assert_eq!(bench_seconds(200, "Rate Limit Exceeded"), Some(120));
+        // chain-level errors are real answers — never benched
+        assert_eq!(bench_seconds(200, "execution reverted"), None);
+        assert_eq!(bench_seconds(400, "invalid params"), None);
+    }
+
+    #[test]
+    fn read_cache_only_caches_idempotent_reads() {
+        assert!(cache_ttl("eth_blockNumber").is_some());
+        assert!(cache_ttl("eth_getBalance").is_some());
+        assert!(cache_ttl("eth_call").is_some());
+        // logs, receipts and anything mutating are never cached
+        assert!(cache_ttl("eth_getLogs").is_none());
+        assert!(cache_ttl("eth_getTransactionReceipt").is_none());
+        assert!(cache_ttl("eth_sendRawTransaction").is_none());
+    }
+
+    #[test]
+    fn registry_pools_are_populated_and_deduped() {
+        for net in registry::NETWORKS {
+            assert!(!net.public_rpcs.is_empty(), "{} pool empty", net.name);
+            for u in net.public_rpcs {
+                assert!(u.starts_with("https://"), "{} bad url {u}", net.name);
+            }
+            let mut seen = std::collections::HashSet::new();
+            for u in net.public_rpcs {
+                assert!(seen.insert(*u), "{} duplicate gateway {u}", net.name);
+            }
+        }
+    }
+
+    #[test]
+    fn adapter_splices_fallbacks_behind_the_primary() {
+        // Operator override on base: primary first, verified publics behind.
+        let pools = build_pools(vec![
+            ("base".into(), "https://my-dedicated.example.com/v2/key".into()),
+        ]);
+        let p = pools.get("base").unwrap();
+        assert_eq!(p.gateways[0].url, "https://my-dedicated.example.com/v2/key");
+        assert!(p.gateways[0].primary);
+        assert_eq!(p.gateways[1].url, "https://mainnet.base.org");
+        // registry pool fully inherited, no duplicates
+        let urls: Vec<&str> = p.gateways.iter().map(|g| g.url.as_str()).collect();
+        assert_eq!(urls.len(), 1 + registry::find("base").unwrap().public_rpcs.len());
+    }
+
+    #[test]
+    fn mainnet_alias_inherits_ethereum_fallbacks() {
+        let pools = build_pools(vec![(
+            "mainnet".into(),
+            "https://my-dedicated.example.com/v2/key".into(),
+        )]);
+        let p = pools.get("mainnet").unwrap();
+        assert_eq!(p.gateways[0].url, "https://my-dedicated.example.com/v2/key");
+        assert_eq!(p.gateways[1].url, "https://ethereum-rpc.publicnode.com");
+        assert_eq!(
+            p.gateways.len(),
+            1 + registry::find("ethereum").unwrap().public_rpcs.len()
+        );
+    }
+
+    #[test]
+    fn primary_equal_to_public_not_duplicated() {
+        // Operator sets EVM_RPC_BASE to the same official gateway — pool
+        // must not contain it twice.
+        let pools = build_pools(vec![("base".into(), "https://mainnet.base.org".into())]);
+        let p = pools.get("base").unwrap();
+        assert_eq!(p.gateways.len(), registry::find("base").unwrap().public_rpcs.len());
+        assert!(p.gateways[0].primary);
     }
 }

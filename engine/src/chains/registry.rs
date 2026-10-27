@@ -5,9 +5,12 @@
 //! - vetted token contracts (two-source rule: CoinGecko tokenlist address +
 //!   on-chain `symbol()`/`decimals()` probe — see `scripts/assemble_registry.py`),
 //! - sane confirmation depths for finality-sensitive settlement,
-//! - a default public RPC so the engine works out of the box. Operators can
-//!   override any endpoint with `EVM_RPC_<NAME>` (recommended for volume —
-//!   public endpoints rate-limit aggressively).
+//! - a **pool** of free public RPC gateways (each probed live with
+//!   `eth_chainId` before inclusion — dead or non-standard gateways never
+//!   ship). The engine rotates across the pool and fails over automatically,
+//!   so no single free gateway can take a network down. Operators can splice
+//!   a dedicated provider in front with `EVM_RPC_<NAME>`; the public pool
+//!   then acts as free fallbacks behind it.
 //!
 //! Verification history (2026-10, live on-chain checks):
 //! - `eth_chainId` correct on every network,
@@ -44,8 +47,12 @@ pub struct NetworkSpec {
     pub native: &'static str,
     /// Confirmations required before a payment is counted as observed.
     pub confirmations: u64,
-    /// Default public RPC. Override with `EVM_RPC_<NAME_UPPER>` in prod.
-    pub public_rpc: &'static str,
+    /// Free public RPC gateways, verified by a live `eth_chainId` probe at
+    /// registry build time. Index 0 is the historical default and stays the
+    /// diagnostics' reference endpoint. The engine rotates across the pool
+    /// and auto-fails-over. Override the primary with `EVM_RPC_<NAME_UPPER>`
+    /// for production volume — the pool remains as fallbacks behind it.
+    pub public_rpcs: &'static [&'static str],
     /// Block explorer prefix for building receipt links.
     pub explorer_tx: &'static str,
     /// Settleable ERC-20 tokens on this network.
@@ -58,6 +65,10 @@ macro_rules! tokens {
     };
 }
 
+macro_rules! rpcs {
+    ($($u:expr),* $(,)?) => { &[ $( $u ),* ] };
+}
+
 /// The eight production EVM mainnets. Token addresses below were verified
 /// on-chain (symbol + decimals) during the 2026-10 registry build; see the
 /// module header for the two-source rule.
@@ -67,7 +78,12 @@ pub const NETWORKS: &[NetworkSpec] = &[
         chain_id: 8453,
         native: "ETH",
         confirmations: 8,
-        public_rpc: "https://mainnet.base.org",
+        public_rpcs: rpcs![
+            "https://mainnet.base.org",             // official (OP Stack)
+            "https://base-rpc.publicnode.com",      // PublicNode
+            "https://base.drpc.org",                // dRPC
+            "https://base.meowrpc.com",             // MeowRPC
+        ],
         explorer_tx: "https://basescan.org/tx/",
         tokens: tokens![
             "USDC"  => ("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", 6),
@@ -83,7 +99,13 @@ pub const NETWORKS: &[NetworkSpec] = &[
         chain_id: 1,
         native: "ETH",
         confirmations: 6,
-        public_rpc: "https://ethereum-rpc.publicnode.com",
+        public_rpcs: rpcs![
+            "https://ethereum-rpc.publicnode.com",  // PublicNode
+            "https://eth.drpc.org",                 // dRPC
+            "https://cloudflare-eth.com",           // Cloudflare
+            "https://eth.meowrpc.com",              // MeowRPC
+            "https://rpc.flashbots.net",            // Flashbots Protect
+        ],
         explorer_tx: "https://etherscan.io/tx/",
         tokens: tokens![
             "USDC"  => ("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", 6),
@@ -115,7 +137,12 @@ pub const NETWORKS: &[NetworkSpec] = &[
         chain_id: 42161,
         native: "ETH",
         confirmations: 12,
-        public_rpc: "https://arb1.arbitrum.io/rpc",
+        public_rpcs: rpcs![
+            "https://arb1.arbitrum.io/rpc",               // official
+            "https://arbitrum-one-rpc.publicnode.com",    // PublicNode
+            "https://arbitrum.drpc.org",                  // dRPC
+            "https://arbitrum.meowrpc.com",               // MeowRPC
+        ],
         explorer_tx: "https://arbiscan.io/tx/",
         tokens: tokens![
             "USDC" => ("0xaf88d065E77c8cC2239327C5EDb3A432268e5831", 6),
@@ -132,7 +159,10 @@ pub const NETWORKS: &[NetworkSpec] = &[
         chain_id: 137,
         native: "POL",
         confirmations: 30,
-        public_rpc: "https://polygon-bor-rpc.publicnode.com",
+        public_rpcs: rpcs![
+            "https://polygon-bor-rpc.publicnode.com", // PublicNode
+            "https://polygon.drpc.org",               // dRPC
+        ],
         explorer_tx: "https://polygonscan.com/tx/",
         tokens: tokens![
             "USDC" => ("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359", 6),
@@ -147,7 +177,11 @@ pub const NETWORKS: &[NetworkSpec] = &[
         chain_id: 10,
         native: "ETH",
         confirmations: 8,
-        public_rpc: "https://mainnet.optimism.io",
+        public_rpcs: rpcs![
+            "https://mainnet.optimism.io",          // official (OP Stack)
+            "https://optimism-rpc.publicnode.com",  // PublicNode
+            "https://optimism.drpc.org",            // dRPC
+        ],
         explorer_tx: "https://optimistic.etherscan.io/tx/",
         tokens: tokens![
             "USDC"  => ("0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85", 6),
@@ -172,7 +206,11 @@ pub const NETWORKS: &[NetworkSpec] = &[
         chain_id: 56,
         native: "BNB",
         confirmations: 15,
-        public_rpc: "https://bsc-rpc.publicnode.com",
+        public_rpcs: rpcs![
+            "https://bsc-rpc.publicnode.com",        // PublicNode
+            "https://bsc-dataseed.binance.org",      // Binance (official)
+            "https://bsc-dataseed1.defibit.io",      // DeFiBit seed (official list)
+        ],
         explorer_tx: "https://bscscan.com/tx/",
         tokens: tokens![
             "USDT"  => ("0x524bC91dc82d6B90eF29F76A3ECAAbaffFD490Bc", 6),
@@ -199,7 +237,11 @@ pub const NETWORKS: &[NetworkSpec] = &[
         chain_id: 43114,
         native: "AVAX",
         confirmations: 10,
-        public_rpc: "https://avalanche-c-chain-rpc.publicnode.com",
+        public_rpcs: rpcs![
+            "https://avalanche-c-chain-rpc.publicnode.com", // PublicNode
+            "https://api.avax.network/ext/bc/C/rpc",        // Ava Labs (official)
+            "https://avalanche.drpc.org",                   // dRPC
+        ],
         explorer_tx: "https://snowtrace.io/tx/",
         tokens: tokens![
             "USDT"  => ("0x9702230A8Ea53601f5cd2dc00fDBc13d4dF4A8c7", 6),
@@ -219,7 +261,11 @@ pub const NETWORKS: &[NetworkSpec] = &[
         chain_id: 480,
         native: "ETH",
         confirmations: 8,
-        public_rpc: "https://worldchain-mainnet.g.alchemy.com/public",
+        public_rpcs: rpcs![
+            "https://worldchain-mainnet.g.alchemy.com/public",  // Alchemy public
+            "https://worldchain-mainnet.gateway.tenderly.co",   // Tenderly gateway
+            "https://worldchain.drpc.org",                      // dRPC
+        ],
         explorer_tx: "https://worldscan.org/tx/",
         tokens: tokens![
             "USDC"  => ("0x79A02482A880bCE3F13e09Da970dC34db4CD24d1", 6),

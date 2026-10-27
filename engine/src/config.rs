@@ -121,8 +121,10 @@ impl Config {
 
         let oracle_url = env::var("PAYPHONE_ORACLE_URL").ok().filter(|s| !s.is_empty());
 
-        // EVM networks: every shipped mainnet gets its registry default public
-        // RPC, overridable via `EVM_RPC_<NETWORK>` (production should override).
+        // EVM networks: every shipped mainnet gets the first verified public
+        // RPC of its registry pool as primary (overridable via
+        // `EVM_RPC_<NETWORK>`), and the adapter keeps the rest of the pool as
+        // free automatic fallbacks (see chains/evm.rs).
         let mut evm_rpcs: Vec<(String, String)> = crate::chains::registry::NETWORKS
             .iter()
             .map(|net| {
@@ -130,7 +132,7 @@ impl Config {
                 let url = env::var(&env_name)
                     .ok()
                     .filter(|u| !u.is_empty())
-                    .unwrap_or_else(|| net.public_rpc.to_string());
+                    .unwrap_or_else(|| net.public_rpcs[0].to_string());
                 (net.name.to_string(), url)
             })
             .collect();
