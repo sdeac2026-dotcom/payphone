@@ -56,6 +56,15 @@ pub struct Config {
     pub production: bool,
     /// Revoked merchant `key_id`s (env `PAYPHONE_REVOKED_KEYS`, comma-separated).
     pub revoked_keys: Vec<String>,
+    /// Protocol fee recipient (the treasury) — env `PAYPHONE_TREASURY_ADDRESS`.
+    /// This is the operator's own wallet: the address that receives the
+    /// protocol share (60%) of every processing fee. When set, every invoice
+    /// names it as `fee_recipient`, the hosted checkout renders the
+    /// fee-settlement line, and SimNet executes the fee transfer alongside
+    /// each invoice payment so the full revenue path is observable on-chain.
+    /// Use an address valid on the settlement chains you serve (an EVM
+    /// `0x…` address for the EVM networks, a `TP…` test address on Tron, etc.).
+    pub treasury: Option<String>,
 }
 
 impl Config {
@@ -181,6 +190,11 @@ impl Config {
             })
             .unwrap_or_default();
 
+        // The treasury: where the protocol share of every fee lands. Optional
+        // so development keeps working without one — but a production node
+        // earning revenue should always set it (it is the operator's wallet).
+        let treasury = env_opt("PAYPHONE_TREASURY_ADDRESS");
+
         Self {
             port,
             master_key,
@@ -200,6 +214,7 @@ impl Config {
             demo_mode,
             production,
             revoked_keys,
+            treasury,
         }
     }
 

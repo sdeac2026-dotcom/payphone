@@ -446,6 +446,20 @@ async fn create_invoice(
     let payment_url = format!("{base}/#/pay/{}?t={token}", invoice.id);
 
     let fb = fee_breakdown(&invoice);
+    // Revenue engine, made concrete: when the operator configured a treasury
+    // (`PAYPHONE_TREASURY_ADDRESS`), every invoice names the fee recipient and
+    // the exact fee quantity — priced at the rate locked into this invoice —
+    // so the fee line can be settled as transparently as the payment itself.
+    let fee_recipient = state.config.treasury.as_ref().map(|addr| {
+        let fee_qty = invoice::fee_qty_for(&invoice);
+        json!({
+            "address": addr,
+            "asset": invoice.asset,
+            "network": invoice.network,
+            "fee_qty": fee_qty.to_string(),
+            "fee_amount_decimal": crate::chains::evm::base_units_to_decimal(fee_qty, decimals),
+        })
+    });
     Ok(ok_created(json!({
         "invoice": invoice,
         "token": token,
@@ -454,6 +468,7 @@ async fn create_invoice(
         "rate": rate,
         "asset_amount": asset_amount,
         "fee": fb,
+        "fee_recipient": fee_recipient,
         "ttl_secs": ttl,
     })))
 }
@@ -498,6 +513,36 @@ async fn get_invoice(
     }
 
     let rate = state.oracle.rate(&inv.asset).await.ok();
+    // Fee destination for this invoice (display decimals mirror the
+    // settlement resolution used at creation; `fee_qty` is the exact,
+    // rate-locked quantity — the settlement truth in base units).
+    let fee_decimals: u8 = if inv.token_address.is_empty() {
+        match inv.chain.as_str() {
+            "bitcoin" => 8,
+            "solana" => 9,
+            "tron" => 6,
+            "simnet" => crate::oracle::decimals(&inv.asset),
+            _ => registry::native_decimals(&inv.network),
+        }
+    } else if inv.chain == "solana" || inv.chain == "tron" {
+        registry::resolve_offchain_token(&inv.chain, &inv.asset)
+            .map(|t| t.decimals)
+            .unwrap_or(6)
+    } else {
+        registry::resolve_token(&inv.network, &inv.asset)
+            .map(|t| t.decimals)
+            .unwrap_or(18)
+    };
+    let fee_recipient = state.config.treasury.as_ref().map(|addr| {
+        let fee_qty = invoice::fee_qty_for(&inv);
+        json!({
+            "address": addr,
+            "asset": inv.asset,
+            "network": inv.network,
+            "fee_qty": fee_qty.to_string(),
+            "fee_amount_decimal": crate::chains::evm::base_units_to_decimal(fee_qty, fee_decimals),
+        })
+    });
     let with_status = InvoiceWithStatus {
         invoice: inv.clone(),
         status: status.clone(),
@@ -507,6 +552,7 @@ async fn get_invoice(
     Ok(ok(json!({
         "invoice": with_status,
         "fee": fee_breakdown(&inv),
+        "fee_recipient": fee_recipient,
         "rate": rate,
         "asset_amount": rate.as_ref().map(|r| asset_amount_string(inv.amount_minor, r.usd)).unwrap_or_default(),
         "receipts": observation.receipts,
@@ -773,11 +819,13 @@ async fn get_quote(
 // ------------------------------------------------------------------- fees --
 
 /// `GET /v1/fees/schedule` — the public revenue model, full transparency.
+/// Also names the live treasury (protocol fee recipient) when configured.
 async fn fee_schedule(State(state): Ctx) -> ApiResult<Response> {
     guard(&state, "fees")?;
     Ok(ok(json!({
         "schedule": fees::SCHEDULE,
         "split": { "protocol_pct": fees::SPLIT.0, "referrer_pct": fees::SPLIT.1, "operations_pct": fees::SPLIT.2 },
+        "treasury": state.config.treasury,
     })))
 }
 
@@ -1043,6 +1091,10 @@ struct SimPayReq {
     invoice_id: Option<String>,
     #[serde(default)]
     from: Option<String>,
+    /// Invoice token: lets the engine settle the protocol fee alongside the
+    /// payment (fee priced from the signed object, not the client).
+    #[serde(default)]
+    token: Option<String>,
 }
 
 /// `POST /v1/simnet/pay` — the demo wallet: inject a payment into SimNet.
@@ -1062,8 +1114,38 @@ async fn simnet_pay(State(state): Ctx, body: axum::body::Bytes) -> ApiResult<Res
         req.invoice_id.as_deref(),
         req.from.as_deref().unwrap_or("simnet-wallet"),
     )?;
+    // Revenue engine, made observable: with a treasury configured, the fee
+    // travels WITH the payment — a second SimNet transaction payer →
+    // treasury, priced from the signed invoice token at the locked rate.
+    let mut fee_tx = None;
+    if let (Some(treasury), Some(tok)) = (state.config.treasury.as_ref(), req.token.as_deref()) {
+        if let Ok(inv) = invoice::verify_token(&state.config.signing_key, tok) {
+            let id_matches = req.invoice_id.as_deref().map_or(true, |id| id == inv.id);
+            if id_matches && inv.chain == "simnet" {
+                let fee_qty = invoice::fee_qty_for(&inv);
+                if fee_qty > 0 {
+                    let fee_block = sim.pay(
+                        treasury,
+                        &inv.asset.to_uppercase(),
+                        fee_qty,
+                        Some(&format!("fee:{}", inv.id)),
+                        req.from.as_deref().unwrap_or("simnet-wallet"),
+                    )?;
+                    fee_tx = Some(json!({
+                        "height": fee_block.height,
+                        "hash": fee_block.hash,
+                        "ts": fee_block.ts,
+                        "to": treasury,
+                        "asset": inv.asset.to_uppercase(),
+                        "qty": fee_qty.to_string(),
+                    }));
+                }
+            }
+        }
+    }
     Ok(ok_created(json!({
         "tx": { "height": block.height, "hash": block.hash, "ts": block.ts },
+        "fee_tx": fee_tx,
         "to": req.to,
         "amount_minor": req.amount_minor.to_string(),
         "balance_after": sim.balance(&req.to).to_string(),

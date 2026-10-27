@@ -227,6 +227,20 @@ pub fn fee_breakdown(invoice: &Invoice) -> fees::FeeBreakdown {
     fees::compute(invoice.amount_minor, invoice.fee_bps, &invoice.tier)
 }
 
+/// Protocol fee quantity in **asset base units**, priced at the exact rate
+/// locked into this invoice. Derived purely from the signed object —
+/// `fee_qty = qte × fee_total / amount` — so payer, merchant and operator all
+/// compute the identical number without trusting each other or the clock.
+/// An integer proportion: no floats, no re-pricing, no drift.
+pub fn fee_qty_for(invoice: &Invoice) -> u128 {
+    if invoice.amount_minor == 0 {
+        return 0;
+    }
+    let fee_total =
+        fees::compute(invoice.amount_minor, invoice.fee_bps, &invoice.tier).fee_total_minor as u128;
+    invoice.qte.saturating_mul(fee_total) / invoice.amount_minor as u128
+}
+
 /// Asset quantity the payer should send, given a USD minor amount and price.
 /// `price` = USD per 1 asset unit; returns a decimal string with 6 dp.
 pub fn asset_amount_string(amount_minor: u64, price: f64) -> String {
@@ -347,6 +361,25 @@ mod tests {
     fn description_never_leaks_pii() {
         assert!(hash_description("invoice #1001 for Alice").is_empty() == false);
         assert_eq!(hash_description("").len(), 0);
+    }
+
+    #[test]
+    fn fee_qty_is_the_exact_proportion_at_the_locked_rate() {
+        // $25.00 at growth (70 bps) → fee $0.17 → at the locked rate
+        // (25_000_000 base units for $25.00) the fee is 170_000 base units.
+        let inv = sample();
+        assert_eq!(fee_qty_for(&inv), 170_000);
+        // 18-decimal stablecoin invoice: $19.99 at growth (70 bps) →
+        // fee_total = 1999 × 70 / 10_000 = 13 cents; fee qty tracks exactly.
+        let mut big = sample();
+        big.amount_minor = 19_99;
+        big.qte = 19_990_000_000_000_000_000;
+        let expected = big.qte.saturating_mul(13) / 19_99;
+        assert_eq!(fee_qty_for(&big), expected);
+        // Degenerate amounts stay safe.
+        let mut zero = sample();
+        zero.amount_minor = 0;
+        assert_eq!(fee_qty_for(&zero), 0);
     }
 
     #[test]

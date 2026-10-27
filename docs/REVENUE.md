@@ -1,7 +1,8 @@
 # The PayPhone Revenue Engine
 
 How the network sustains itself — computed at invoice time, embedded in the
-signed token, auditable on-chain.
+signed token, named on the checkout, and settled to a wallet anyone can
+verify.
 
 ## Fee schedule (public API contract)
 
@@ -24,7 +25,7 @@ Every fee splits **60 / 25 / 15**:
 
 ```text
 fee = amount × tier_bps / 10_000     (integer minor units, no floats)
-├── 60% protocol  → FeeVault contract (on-chain, event-auditable)
+├── 60% protocol  → the treasury: PAYPHONE_TREASURY_ADDRESS (the operator's wallet)
 ├── 25% referrer  → the party that onboarded the merchant (growth flywheel)
 └── 15% operations → RPC providers, oracle infra, support
 ```
@@ -33,6 +34,25 @@ Example — $100.00 at Growth (70 bps): fee $0.70 → protocol $0.42,
 referrer $0.17, operations $0.11. The full breakdown is embedded in every
 invoice response **and rendered on the payer's checkout** — transparency is
 a feature.
+
+### The treasury address (the "which wallet gets paid" answer)
+
+The operator sets `PAYPHONE_TREASURY_ADDRESS` once. From then on:
+
+- **every invoice** names the treasury as `fee_recipient`, with the fee
+  quantity priced at the invoice's own locked rate
+  (`fee_qty = qte × fee_total / amount` — exact integer math, unit-tested);
+- **the hosted checkout** renders the fee-settlement line (amount + address)
+  for the payer, next to the standard fee transparency block;
+- **`GET /v1/fees/schedule`** publishes the treasury publicly, so anyone can
+  verify which address the protocol share is owed to;
+- **on SimNet** the fee is settled automatically as its own journal
+  transaction (`fee:inv_…`) alongside every invoice payment — the whole
+  revenue path is observable end-to-end without gas.
+
+On real chains the fee line is a transparent settlement instruction priced
+into the merchant relationship (enforced by key issuance); the on-chain
+`FeeVault` contract that auto-splits at payment time is the v2 evolution.
 
 ## Revenue lines
 
@@ -43,6 +63,13 @@ a feature.
 3. **Tier subscriptions** — optional; the included-volume thresholds make
    high-volume merchants upgrade naturally. Metering is stateless today
    (tier in the key) with on-chain metering in the FeeVault as the v2 path.
+4. **Commercial licenses** — the dual-licensing track: businesses that want
+   to run modified or white-labeled PayPhone **without** the AGPL
+   source-disclosure obligation buy a commercial license
+   ([COMMERCIAL-LICENSE.md](../COMMERCIAL-LICENSE.md), from $290/yr).
+   The AGPL keeps the network open forever; commercial licensing turns that
+   openness into lifetime revenue. Contributions are dual-licensed by
+   policy (see CONTRIBUTING.md) so both tracks stay legally clean.
 
 ## Why this design sustains the network
 
@@ -58,7 +85,9 @@ a feature.
 ## Operations
 
 - Fees are computed in `engine/src/fees.rs` — single source of truth,
-  unit-tested (`fee_math_is_exact_and_splits_fully`).
+  unit-tested (`fee_math_is_exact_and_splits_fully`); the fee quantity is
+  derived in `engine/src/invoice.rs::fee_qty_for`
+  (`fee_qty_is_the_exact_proportion_at_the_locked_rate`).
 - The checkout renders the breakdown from the invoice response; nothing is
   recalculated client-side.
 - Gas for on-chain fee forwarding is covered by the 15% operations share.

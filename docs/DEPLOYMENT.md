@@ -26,6 +26,7 @@ point-and-click deploy.
    | `PAYPHONE_SIGNING_KEY` | `openssl rand -hex 32` |
    | `PAYPHONE_PHONE_PEPPER` | `openssl rand -hex 32` |
    | `PAYPHONE_ADMIN_TOKEN` | `openssl rand -hex 24` |
+   | `PAYPHONE_TREASURY_ADDRESS` | **your wallet** — receives the 60% protocol fee share (an EVM `0x…` address for the EVM chains) |
    | `PAYPHONE_CHECKOUT_URL` | `https://<your-service>.up.railway.app` (set after the first deploy) |
    | `PAYPHONE_CORS_ORIGINS` | `https://<your-service>.up.railway.app` |
 
@@ -45,7 +46,9 @@ secrets at apply time:
 1. Render Dashboard → **New → Blueprint** → point at the repo → **Apply**.
 2. After the first deploy, set `PAYPHONE_CHECKOUT_URL` +
    `PAYPHONE_CORS_ORIGINS` to your service URL (`https://payphone.onrender.com`
-   or a custom domain) → **Manual Deploy** to apply.
+   or a custom domain), plus **`PAYPHONE_TREASURY_ADDRESS`** — your own wallet,
+   so the 60% protocol share of every fee lands with *you* → **Manual Deploy**
+   to apply.
 
 ### First real-money run (both platforms)
 
@@ -57,7 +60,12 @@ secrets at apply time:
 3. Create an invoice in a **real asset** (USDC on Base, ETH, BTC, SOL, …),
    share the hosted checkout link, pay a small real amount from any wallet,
    watch the invoice flip to **paid** with an on-chain receipt.
-4. Verify `GET /api/health` → `{"web":true,"engine":true,"oracle":true}` and
+4. **Turn on your revenue.** Set `PAYPHONE_TREASURY_ADDRESS` to your wallet
+   and redeploy — every invoice now names your address as the fee recipient,
+   the checkout shows the fee-settlement line, and on SimNet the fee travels
+   as its own transaction so you can watch income arrive. Confirm via
+   `GET /api/v1/fees/schedule` → `"treasury": "0x…"`.
+5. Verify `GET /api/health` → `{"web":true,"engine":true,"oracle":true}` and
    `GET /api/v1/chains` → every network `rpc_live: true`.
 
 All seven EVM mainnets + Bitcoin + Solana + Tron ship enabled on public RPC
@@ -116,6 +124,7 @@ cd services/oracle-py && pip install -r requirements.txt
 | `PAYPHONE_CHECKOUT_URL` | recommended | Public origin for payment links (e.g. `https://pay.yourdomain.com`) |
 | `PAYPHONE_ORACLE_URL` | recommended | e.g. `http://127.0.0.1:8001` |
 | `PAYPHONE_ADMIN_TOKEN` | prod | Gates `POST /v1/keys` |
+| `PAYPHONE_TREASURY_ADDRESS` | recommended | **The operator's wallet** — recipient of the 60% protocol fee share. Named on every invoice (`fee_recipient`), rendered on the checkout, published by `GET /v1/fees/schedule`. On SimNet the fee is settled automatically as its own transaction. Use an address valid on the chains you serve. |
 | `PAYPHONE_REVOKED_KEYS` | as needed | Comma-separated `key_id`s — instant revocation of leaked merchant keys |
 | `PAYPHONE_CORS_ORIGINS` | prod | Comma list; never `*` in prod |
 | `PAYPHONE_PORT` | no | Default 8080 |
@@ -192,6 +201,8 @@ the public origin (the engine also honors `X-Forwarded-Host`/`-Proto`).
       stored in KMS, never in git
 - [ ] `PAYPHONE_SIMNET=0`; all chains live (7 EVM mainnets + Bitcoin/Solana/Tron ship enabled on public defaults — verify `GET /v1/chains` shows `rpc_live: true` and `chain_id_matches: true`, then point `EVM_RPC_*` / `BTC_API_BASE` / `SOL_RPC_URL` / `TRON_API_BASE` at your providers)
 - [ ] `PAYPHONE_ADMIN_TOKEN` set; key issuance behind it
+- [ ] `PAYPHONE_TREASURY_ADDRESS` set to your wallet; `GET /v1/fees/schedule`
+      echoes it back as `treasury` (this is how the network pays *you*)
 - [ ] `PAYPHONE_CORS_ORIGINS` locked to your console origin
 - [ ] Webhook endpoints verified with `POST /v1/webhooks/test` + SDK check
 - [ ] Small real-value invoice paid end-to-end; receipt visible on-chain

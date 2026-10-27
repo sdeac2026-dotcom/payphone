@@ -10,6 +10,7 @@
 import type {
   EngineHealth,
   FeeBreakdown,
+  FeeRecipient,
   FeeSchedule,
   Invoice,
   InvoiceWithStatus,
@@ -242,7 +243,7 @@ export const api = {
     },
     creds: { pk: string; sk: string }
   ) =>
-    request<{ invoice: Invoice; token: string; payment_url: string; checkout_path: string; rate: Rate; asset_amount: string; fee: FeeBreakdown }>(
+    request<{ invoice: Invoice; token: string; payment_url: string; checkout_path: string; rate: Rate; asset_amount: string; fee: FeeBreakdown; fee_recipient: FeeRecipient | null }>(
       "POST",
       "/invoices",
       input,
@@ -253,6 +254,7 @@ export const api = {
     request<{
       invoice: InvoiceWithStatus;
       fee: FeeBreakdown;
+      fee_recipient: FeeRecipient | null;
       rate: Rate | null;
       asset_amount: string;
       receipts: {
@@ -304,8 +306,12 @@ export const api = {
 
   // --------------------------------------------------------------- simnet ----
 
-  simnetPay: (input: { to: string; asset: string; amount_minor: number; invoice_id?: string; from?: string }) =>
-    request<{ tx: { height: number; hash: string; ts: number }; balance_after: string }>(
+  simnetPay: (input: { to: string; asset: string; amount_minor: number; invoice_id?: string; from?: string; token?: string }) =>
+    request<{
+      tx: { height: number; hash: string; ts: number };
+      fee_tx: { height: number; hash: string; ts: number; to: string; asset: string; qty: string } | null;
+      balance_after: string;
+    }>(
       "POST",
       "/simnet/pay",
       input

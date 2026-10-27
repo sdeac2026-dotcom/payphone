@@ -44,6 +44,17 @@ python3 scripts/integration_test.py   # end-to-end lifecycle (19 checks)
    the code comment and the docs (see the v1 limitations list in
    `docs/SECURITY.md` — keep it current).
 6. **SimNet stays a simulator.** It must never be the path for real funds.
+7. **Licensing.** By contributing you agree your contributions are licensed
+   under **AGPL-3.0-or-later**, *and* you grant the PayPhone project operator
+   the right to license your contributions under commercial terms — this is
+   what makes dual licensing (and therefore the network's funding) legally
+   possible. The SDKs stay MIT.
+
+## Licensing of the project
+
+PayPhone is dual-licensed: [AGPL-3.0](LICENSE) for everything open, and a
+[commercial license](COMMERCIAL-LICENSE.md) for closed-source / white-label
+use. Contributions flow into both tracks — see Ground rule 7.
 
 ## Pull requests
 

@@ -23,6 +23,7 @@ ORACLE_PORT, ENGINE_PORT, WEB_PORT = 18001, 18081, 18080
 WEB = f"http://127.0.0.1:{WEB_PORT}"
 ENGINE = f"http://127.0.0.1:{ENGINE_PORT}"
 ADMIN = "pp-test-admin-token-9f2c"
+TREASURY = "PP" + "a1b2c3d4e5" * 4  # the operator wallet under test
 TMP = "/tmp/pp-prodtest"
 os.makedirs(TMP, exist_ok=True)
 
@@ -124,7 +125,8 @@ engine = spawn([f"{ROOT}/engine/target/release/payphone-engine"], f"{ROOT}/engin
                 "PAYPHONE_ORACLE_URL": f"http://127.0.0.1:{ORACLE_PORT}",
                 "PAYPHONE_SIMNET": "1",
                 "PAYPHONE_SIMNET_DIR": f"{TMP}/simnet",
-                "PAYPHONE_ADMIN_TOKEN": ADMIN},
+                "PAYPHONE_ADMIN_TOKEN": ADMIN,
+                "PAYPHONE_TREASURY_ADDRESS": TREASURY},
                "engine.log")
 node_bin = shutil.which("node") or shutil.which("bun")
 check("runtime JS engine available (node preferred, bun fallback)", node_bin is not None)
@@ -172,8 +174,26 @@ try:
     check("hosted checkout page served on the public port", "PayPhone" in page)
     pay = api("/api/v1/simnet/pay", {"to": d["invoice"]["address"], "asset": "USDC",
                                      "amount_minor": int(d["invoice"]["qte"]),
-                                     "invoice_id": inv_id, "from": "PP0123456789abcdef0123456789abcdef01234567"})
+                                     "invoice_id": inv_id, "from": "PP0123456789abcdef0123456789abcdef01234567",
+                                     "token": token})
     check("payment accepted (simnet tx observed)", "data" in pay, json.dumps(pay)[:150])
+
+    # 5. revenue engine: fee names + settles to the treasury
+    fr = d.get("fee_recipient")
+    check("invoice names the treasury as fee_recipient (locked-rate fee qty)",
+          fr is not None and fr.get("address") == TREASURY and fr.get("fee_qty", "0") not in ("", "0"),
+          json.dumps(fr)[:200])
+    ftx = (pay.get("data") or {}).get("fee_tx")
+    check("fee settled alongside payment (payer → treasury tx)",
+          ftx is not None and ftx.get("to") == TREASURY and bool(ftx.get("hash")),
+          json.dumps(ftx)[:200])
+    tb = api(f"/api/v1/simnet/balance/{TREASURY}")
+    check("treasury balance credited on the chain",
+          (tb.get("data") or {}).get("balance_minor", "0") != "0", json.dumps(tb)[:150])
+    sch = api("/api/v1/fees/schedule")
+    check("fee schedule publishes the treasury",
+          (sch.get("data") or {}).get("treasury") == TREASURY, json.dumps(sch.get("data", {}))[:120])
+
     st = api(f"/api/v1/invoices/{inv_id}?token={token}")
     check("invoice status flips to PAID", st.get("data", {}).get("invoice", {}).get("status") == "paid",
           json.dumps(st)[:200])

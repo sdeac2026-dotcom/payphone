@@ -127,6 +127,8 @@ try:
     code, raw = get("/api/v1/fees/schedule", timeout=20)
     body = json.loads(raw).get("data", {})
     check("fee schedule public", bool(body), json.dumps(body)[:200])
+    check("fee schedule carries the treasury field (null until operator sets it)",
+          "treasury" in body, json.dumps(body)[:200])
 except Exception as e:
     check("fee schedule public", False, repr(e))
 

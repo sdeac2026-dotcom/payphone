@@ -2,6 +2,7 @@
   "name": "payphone",
   "version": "1.0.0",
   "private": true,
+  "license": "AGPL-3.0-or-later",
   "description": "PayPhone — phone-number-first crypto payment network (Next.js console + gateway)",
   "scripts": {
     "dev": "next dev -p 3000 2>&1 | tee dev.log",

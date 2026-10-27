@@ -8,9 +8,9 @@ Open, stateless crypto payment infrastructure. Accept any coin from anyone
 on earth through one API — payers need nothing more than the phone number
 they already own.
 
-Rust engine · Next.js console · Python oracle · Solidity identity · MIT
+Rust engine · Next.js console · Python oracle · Solidity identity · AGPL-3.0
 
-[Quickstart](#quickstart) · [Architecture](ARCHITECTURE.md) · [API reference](docs/API.md) · [Security](docs/SECURITY.md)
+[Quickstart](#quickstart) · [Architecture](ARCHITECTURE.md) · [API reference](docs/API.md) · [Security](docs/SECURITY.md) · [License](#license)
 
 </div>
 
@@ -185,7 +185,18 @@ curl "http://localhost:8080/v1/invoices/inv_9f2c…?token=eyJ…"
 
 Full threat model: [docs/SECURITY.md](docs/SECURITY.md).
 
-## Revenue model
+## How PayPhone makes money
+
+Four revenue lines — all transparent, none custodial:
+
+| Line | What | Where it lands |
+|---|---|---|
+| **Processing fees** | 0.3–1.5% per payment (tier schedule below) | Treasury / referrer / operations split |
+| **Conversion spread** | 40 bps on instant conversion quotes | Operations |
+| **Tier upgrades** | Volume thresholds make Growth/Scale upgrades natural | Treasury |
+| **Commercial licenses** | AGPL escape hatch for closed-source & white-label use ([COMMERCIAL-LICENSE.md](COMMERCIAL-LICENSE.md)) | Operator |
+
+Processing-fee tiers (public API contract — `GET /v1/fees/schedule`):
 
 | Tier | Fee | Included volume | Highlights |
 |---|---|---|---|
@@ -195,10 +206,24 @@ Full threat model: [docs/SECURITY.md](docs/SECURITY.md).
 | Scale | 0.5% | $2.5M/mo | Dedicated oracle slot, 99.95% SLA |
 | Enterprise | 0.3% | Unlimited | Volume pricing, on-prem engine |
 
-Every fee splits **60 / 25 / 15** (protocol / referrers / operations) and the
-protocol share accumulates in the on-chain [`FeeVault`](contracts/FeeVault.sol)
-— income anyone can audit. Instant conversion adds a transparent 40 bps
-spread. Details: [docs/REVENUE.md](docs/REVENUE.md).
+Every fee splits **60 / 25 / 15** (protocol / referrers / operations), priced
+at the invoice's locked rate and rendered right on the checkout — the protocol
+share is settled to the operator treasury named on every invoice. Instant
+conversion adds a transparent 40 bps spread. Details:
+[docs/REVENUE.md](docs/REVENUE.md).
+
+### Which address receives the money
+
+| Money | Address | Who controls it |
+|---|---|---|
+| Invoice amount (100%) | The **merchant's own wallet**, embedded non-custodially in every invoice | The merchant |
+| Protocol fee share (60%) | `PAYPHONE_TREASURY_ADDRESS` — the operator's wallet, published by `GET /v1/fees/schedule` | The operator |
+| Referrer share (25%) | Paid out by the operator to whoever onboarded the merchant | Referrer |
+| Operations share (15%) | The operator's operating wallet (RPC, oracle, support) | Operator |
+
+Set the treasury once — `PAYPHONE_TREASURY_ADDRESS` in the environment — and
+every invoice, checkout page and fee quote names that exact address, with the
+fee quantity priced at the invoice's locked rate.
 
 ## SimNet — the chain you develop against
 
@@ -237,4 +262,18 @@ Full runbook (env matrix, KMS setup, mainnet checklist):
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+**Dual-licensed — pick the one that fits your use:**
+
+- **[GNU AGPL-3.0](LICENSE)** — the default. Run it, study it, fork it, accept
+  payments with it. If you *modify* it and offer it as a service, you must
+  offer your users the source (AGPL §13 — the clause that keeps SaaS clones
+  honest). This guarantees the network core stays open **forever**; no one can
+  ever close a fork.
+- **[Commercial license](COMMERCIAL-LICENSE.md)** — for running modified or
+  white-labeled PayPhone without the AGPL source-disclosure duty, with support
+  and legal comfort. From $290/year — this is how the network funds itself
+  without taxing openness.
+
+The [TypeScript](sdks/typescript) and [Python](sdks/python) SDKs are MIT, so
+integrating against a PayPhone node never creates copyleft obligations for
+your own product.

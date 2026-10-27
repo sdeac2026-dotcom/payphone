@@ -2,6 +2,10 @@
 PayPhone Oracle Service
 =======================
 
+Copyright (C) 2026 PayPhone Project operators & contributors.
+Dual-licensed: AGPL-3.0-or-later (LICENSE) or commercial license
+(COMMERCIAL-LICENSE.md). SPDX-License-Identifier: AGPL-3.0-or-later
+
 Python microservice (FastAPI) providing three stateless functions to the
 PayPhone Engine:
 

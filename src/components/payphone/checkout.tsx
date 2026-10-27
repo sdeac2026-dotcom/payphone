@@ -103,6 +103,7 @@ export function Checkout({ invoiceId, token }: { invoiceId: string; token: strin
         amount_minor: Number(invoice.qte),
         invoice_id: invoice.id,
         from: "demo-wallet",
+        token,
       });
       await refresh();
     } catch (e) {
@@ -127,6 +128,7 @@ export function Checkout({ invoiceId, token }: { invoiceId: string; token: strin
         amount_minor: Number(invoice.qte),
         invoice_id: invoice.id,
         from: `phone:${payerPhone.slice(-4)}`,
+        token,
       });
       await refresh();
     } catch (e) {
@@ -310,6 +312,18 @@ export function Checkout({ invoiceId, token }: { invoiceId: string; token: strin
             <div className="flex justify-between"><span className="pl-3">· protocol</span><span className="font-mono">{usd(data!.fee.split.protocol_minor)}</span></div>
             <div className="flex justify-between"><span className="pl-3">· referrer</span><span className="font-mono">{usd(data!.fee.split.referrer_minor)}</span></div>
             <div className="flex justify-between"><span className="pl-3">· operations</span><span className="font-mono">{usd(data!.fee.split.operations_minor)}</span></div>
+            {data!.fee_recipient ? (
+              <div className="mt-2 rounded-md border bg-muted/30 p-2.5">
+                <div className="mb-1 flex justify-between font-medium text-foreground">
+                  <span>Protocol fee settlement</span>
+                  <span className="font-mono">{data!.fee_recipient.fee_amount_decimal} {data!.fee_recipient.asset}</span>
+                </div>
+                <p className="text-[11px] leading-relaxed">
+                  The protocol share travels to the network treasury, priced at this invoice&apos;s locked rate:
+                </p>
+                <div className="mt-1 break-all font-mono text-[10px] text-foreground">{data!.fee_recipient.address}</div>
+              </div>
+            ) : null}
           </div>
         </CardContent>
       </Card>

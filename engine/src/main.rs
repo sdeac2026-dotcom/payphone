@@ -1,5 +1,9 @@
 //! PayPhone Engine — entry point.
 //!
+//! Copyright (C) 2026 PayPhone Project operators & contributors.
+//! Dual-licensed: AGPL-3.0-or-later (LICENSE) or commercial license
+//! (COMMERCIAL-LICENSE.md). SPDX-License-Identifier: AGPL-3.0-or-later
+//!
 //! Boot sequence:
 //! 1. Load config from environment (dev-safe defaults + loud warnings).
 //! 2. Open SimNet (replay + verify its hash chain) if enabled.

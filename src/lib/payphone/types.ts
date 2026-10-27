@@ -105,6 +105,19 @@ export interface TierFee {
 export interface FeeSchedule {
   schedule: TierFee[];
   split: { protocol_pct: number; referrer_pct: number; operations_pct: number };
+  /** Operator wallet that receives the protocol fee share (null = unset). */
+  treasury: string | null;
+}
+
+/** Where the protocol share of a fee is settled — the operator treasury. */
+export interface FeeRecipient {
+  address: string;
+  asset: string;
+  network: string;
+  /** Fee quantity in asset base units (decimal string, chain-true). */
+  fee_qty: string;
+  /** Human display amount at the invoice's locked rate, e.g. "0.170000". */
+  fee_amount_decimal: string;
 }
 
 /** Local record of an invoice created in this browser (dashboard history). */
