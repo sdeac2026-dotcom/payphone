@@ -47,6 +47,14 @@ the protocol fee to the treasury, both visible before signing, both verifiable
 on the block explorer. Internal sends deliberately pay nothing — that is the
 network effect: every user wants the other side on PayPhone.
 
+**If no treasury is configured** (`PAYPHONE_TREASURY_ADDRESS` unset), the 0.5%
+is **waived, visibly** — the checkout sheet reads "WAIVED — treasury not
+configured" and no fee transaction is sent. PayPhone is non-custodial: there
+is nowhere to hold a fee in escrow, so the fee is either collected on-chain to
+a real destination or not charged at all. It is never shown as charged while
+going nowhere. Both transactions share one nonce plan (payment = n, fee = n+1)
+so the fee can never collide with or trail behind the payment in the mempool.
+
 Invoice-path fees (checkout / API payments) are a separate, **engine-enforced**
 mechanism: the engine computes `fee_qty` at the invoice's locked rate and the
 `fee_tx` settlement is part of the payment protocol itself.

@@ -28,6 +28,7 @@
 import {
   createPublicClient,
   createWalletClient,
+  encodeFunctionData,
   formatUnits,
   http,
   parseUnits,
@@ -362,6 +363,8 @@ export interface FeePreview {
   bps: bigint;
   feeQty: bigint; // in base units of the asset
   treasury: string | null;
+  /** false = operator treasury not configured — the fee is WAIVED, visibly, never silently dropped. */
+  treasuryConfigured: boolean;
 }
 
 /**
@@ -377,8 +380,13 @@ export async function feePreview(amountQty: bigint, internal: boolean): Promise<
     /* engine offline — fee still computed, routed when it returns */
   }
   const bps = internal ? 0n : WALLET_SEND_FEE_BPS;
-  const feeQty = internal ? 0n : (amountQty * bps) / 10_000n;
-  return { internal, bps, feeQty, treasury };
+  // Honest fee loop: the fee is collected ONLY when the operator treasury is
+  // configured to receive it. Non-custodial means there is nowhere to hold a
+  // fee "in escrow" — with no destination on-chain, the fee is waived, and the
+  // UI says so, rather than pretending it was settled.
+  const treasuryConfigured = treasury !== null;
+  const feeQty = internal || !treasuryConfigured ? 0n : (amountQty * bps) / 10_000n;
+  return { internal, bps, feeQty, treasury, treasuryConfigured };
 }
 
 // -------------------------------------------------------------- recipients --
@@ -397,6 +405,14 @@ export async function resolveRecipient(input: string): Promise<Recipient> {
   if (v.startsWith("+") || /^[0-9][0-9 ()-]{5,}$/.test(v)) {
     const res = await api.identityLookup(v);
     const address = res.wallet ?? res.simnet_address;
+    // Real-chain discipline: simnet placeholder addresses (PP…) cannot receive
+    // on-chain funds. If the recipient has not linked a real 0x wallet, say so
+    // plainly instead of letting the RPC reject a malformed address.
+    if (!/^0x[0-9a-fA-F]{40}$/.test(address)) {
+      throw new Error(
+        "That number is on PayPhone but has no real wallet linked yet. On-chain transfers need a 0x… payout address — ask them to register one (Dashboard → Identity), or pay them with a PayPhone invoice instead."
+      );
+    }
     return {
       kind: "internal",
       address,
@@ -471,23 +487,28 @@ export async function walletSend(req: SendRequest): Promise<SendResult> {
     throw new Error("Balance too low for amount + protocol fee + gas.");
   }
 
+  // ONE nonce decision for the whole send. The payment and (optional) fee tx
+  // are sequential transactions from the same account; deriving the fee tx
+  // nonce from the same base avoids the RPC propagation race where a fresh
+  // getTransactionCount could still return the pre-payment count and collide
+  // the fee tx with the payment tx in the mempool.
+  const baseNonce = await publicClient.getTransactionCount({ address: account.address, blockTag: "pending" });
+
   if (isNative) {
-    await sendNative(publicClient, walletClient, account, c, resolved.address as `0x${string}`, amountQty);
-    txs.push({ hash: "pending", role: "payment", to: resolved.address, qty: req.amount });
+    const hash = await sendNative(publicClient, walletClient, account, c, resolved.address as `0x${string}`, amountQty, baseNonce);
+    txs.push({ hash, role: "payment", to: resolved.address, qty: req.amount });
   } else {
-    await sendToken(publicClient, walletClient, account, c, token!.address as `0x${string}`, resolved.address as `0x${string}`, amountQty);
-    txs.push({ hash: "pending", role: "payment", to: resolved.address, qty: req.amount });
+    const hash = await sendToken(publicClient, walletClient, account, c, token!.address as `0x${string}`, resolved.address as `0x${string}`, amountQty, baseNonce);
+    txs.push({ hash, role: "payment", to: resolved.address, qty: req.amount });
   }
 
   // The fee is its own visible transaction to the operator treasury.
   if (fee.feeQty > 0n && fee.treasury) {
     const feeHuman = formatUnits(fee.feeQty, decimals);
-    if (isNative) {
-      await sendNative(publicClient, walletClient, account, c, fee.treasury as `0x${string}`, fee.feeQty);
-    } else {
-      await sendToken(publicClient, walletClient, account, c, token!.address as `0x${string}`, fee.treasury as `0x${string}`, fee.feeQty);
-    }
-    txs.push({ hash: "pending", role: "fee", to: fee.treasury, qty: feeHuman });
+    const feeHash = isNative
+      ? await sendNative(publicClient, walletClient, account, c, fee.treasury as `0x${string}`, fee.feeQty, baseNonce + 1)
+      : await sendToken(publicClient, walletClient, account, c, token!.address as `0x${string}`, fee.treasury as `0x${string}`, fee.feeQty, baseNonce + 1);
+    txs.push({ hash: feeHash, role: "fee", to: fee.treasury, qty: feeHuman });
   }
 
   const result: SendResult = { resolved, fee, txs, explorerUrl: c.explorer };
@@ -510,10 +531,10 @@ async function sendNative(
   account: LocalAccount,
   c: WalletChain,
   to: `0x${string}`,
-  qty: bigint
+  qty: bigint,
+  nonce: number
 ): Promise<string> {
-  const [nonce, gas, fees] = await Promise.all([
-    publicClient.getTransactionCount({ address: account.address }),
+  const [gas, fees] = await Promise.all([
     publicClient.estimateGas({ account: account.address, to, value: qty }),
     publicClient.estimateFeesPerGas(),
   ]);
@@ -536,11 +557,16 @@ async function sendToken(
   c: WalletChain,
   token: `0x${string}`,
   to: `0x${string}`,
-  qty: bigint
+  qty: bigint,
+  nonce: number
 ): Promise<string> {
-  const [nonce, gas, fees] = await Promise.all([
-    publicClient.getTransactionCount({ address: account.address }),
-    publicClient.estimateGas({ account: account.address, to: token, data: "0x" }),
+  // Estimate gas with the REAL transfer calldata — never a bare call to the
+  // token contract, which either reverts or returns the ~21k plain-transfer
+  // figure and would under-gas the actual ERC-20 transfer (~50k+), burning the
+  // sender's gas for a failed tx.
+  const data = encodeFunctionData({ abi: erc20Abi, functionName: "transfer", args: [to, qty] });
+  const [gas, fees] = await Promise.all([
+    publicClient.estimateGas({ account: account.address, to: token, data }),
     publicClient.estimateFeesPerGas(),
   ]);
   const hash = await walletClient.writeContract({

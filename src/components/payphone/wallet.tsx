@@ -274,7 +274,7 @@ function WalletMain({ prefill, onChanged }: { prefill?: WalletPrefill; onChanged
   const [to, setTo] = useState(prefill?.to ?? "");
   const [amount, setAmount] = useState(prefill?.amount ?? "");
   const [resolved, setResolved] = useState<Recipient | null>(null);
-  const [feeInfo, setFeeInfo] = useState<{ internal: boolean; feeQty: string } | null>(null);
+  const [feeInfo, setFeeInfo] = useState<{ internal: boolean; feeQty: string; treasuryConfigured: boolean } | null>(null);
   const [sending, setSending] = useState(false);
   const [result, setResult] = useState<SendResult | null>(null);
   const [activity, setActivity] = useState<WalletActivity[]>([]);
@@ -313,7 +313,7 @@ function WalletMain({ prefill, onChanged }: { prefill?: WalletPrefill; onChanged
         try { qty = BigInt(Math.round(parseFloat(amount || "0") * 10 ** decimals)); } catch { qty = 0n; }
         const f = await feePreview(qty, r.kind === "internal");
         if (!live) return;
-        setFeeInfo({ internal: f.internal, feeQty: f.feeQty > 0n ? (Number(f.feeQty) / 10 ** decimals).toFixed(6) : "0" });
+        setFeeInfo({ internal: f.internal, feeQty: f.feeQty > 0n ? (Number(f.feeQty) / 10 ** decimals).toFixed(6) : "0", treasuryConfigured: f.treasuryConfigured });
       } catch { /* not resolvable yet — user still typing */ }
     })();
     return () => { live = false; };
@@ -443,7 +443,7 @@ function WalletMain({ prefill, onChanged }: { prefill?: WalletPrefill; onChanged
             {feeInfo && amount && parseFloat(amount) > 0 && (
               <div className="rounded-md border bg-muted/40 px-3 py-2 text-xs space-y-1">
                 <div className="flex justify-between"><span className="text-muted-foreground">Recipient receives</span><span className="font-mono text-xs">{amount} {asset}</span></div>
-                <div className="flex justify-between"><span className="text-muted-foreground">Protocol fee</span><span className="font-mono text-xs">{feeInfo.internal ? "FREE (internal loop)" : `${feeInfo.feeQty} ${asset} (${Number(WALLET_SEND_FEE_BPS) / 100}%)`}</span></div>
+                <div className="flex justify-between"><span className="text-muted-foreground">Protocol fee</span><span className="font-mono text-xs">{feeInfo.internal ? "FREE (internal loop)" : !feeInfo.treasuryConfigured ? "WAIVED — treasury not configured" : `${feeInfo.feeQty} ${asset} (${Number(WALLET_SEND_FEE_BPS) / 100}%)`}</span></div>
                 <div className="flex justify-between"><span className="text-muted-foreground">Network gas</span><span className="text-xs">paid to {chain.label} validators</span></div>
               </div>
             )}
@@ -455,7 +455,14 @@ function WalletMain({ prefill, onChanged }: { prefill?: WalletPrefill; onChanged
                 {result.txs.map((t, i) => (
                   <div key={i} className="flex justify-between gap-2">
                     <span>{t.role === "fee" ? "Protocol fee → treasury" : "Payment"}</span>
-                    <span className="text-muted-foreground">{t.role === "fee" ? `${t.qty} ${asset}` : ""} — signed, confirm on explorer</span>
+                    <a
+                      className="font-mono text-[11px] text-primary underline-offset-2 hover:underline"
+                      href={`${result.explorerUrl}/tx/${t.hash}`}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      {short(t.hash)} ↗
+                    </a>
                   </div>
                 ))}
               </div>
