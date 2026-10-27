@@ -225,6 +225,34 @@ Set the treasury once — `PAYPHONE_TREASURY_ADDRESS` in the environment — and
 every invoice, checkout page and fee quote names that exact address, with the
 fee quantity priced at the invoice's locked rate.
 
+## PayPhone Wallet — non-custodial, phone-number-first
+
+The app ships a real self-custodial wallet at `#/wallet` — the first wallet
+where you pay a **phone number**:
+
+- **Keys never leave the browser.** BIP-39 mnemonic generated locally
+  (MetaMask-compatible path m/44'/60'/0'/0/0 — import or export both ways),
+  encrypted with your passphrase (PBKDF2-SHA256 310k rounds + AES-GCM-256) in
+  localStorage. The engine has no field to receive a key: PayPhone cannot
+  freeze, seize, or lose what it never holds.
+- **Receives from anywhere, sends anywhere.** Standard addresses on seven EVM
+  mainnets — Worldchain, Base, OP Mainnet, Polygon, Arbitrum, BNB Chain and
+  Avalanche. Exchange withdrawals land straight into it; funds can be sent to
+  any exchange or external wallet, same as any normal address.
+- **The closed loop (the moat).** Transfers to a PayPhone phone number resolve
+  through the public, rate-limited `POST /v1/identity/lookup` and settle with
+  **zero protocol fee**. Transfers to an external `0x…` address carry a
+  transparent **0.5% protocol fee, settled on-chain as its own transaction to
+  the operator treasury** — two transfers, two hashes, shown before signing.
+  Every internal send makes the network stickier; every external send pays
+  the rails.
+- **Honest limits.** A browser hot wallet (convenient, not hardware-grade);
+  EVM-only in v1 (BTC/SOL/TRON signing stacks pending); a lost passphrase AND
+  lost phrase means lost funds — by design, for everyone. The external-send
+  fee is enforced by the wallet UI, not yet by an on-chain contract;
+  invoice-path fees ARE engine-enforced (`fee_tx`). Full security model:
+  [docs/WALLET.md](docs/WALLET.md).
+
 ## SimNet — the chain you develop against
 
 SimNet is a real blockchain simulator, not a mock database: an append-only

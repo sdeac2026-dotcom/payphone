@@ -87,7 +87,7 @@ try:
     code, raw = get("/api/v1/chains", timeout=60)
     nets = json.loads(raw).get("data", {}).get("networks", [])
     names = [n.get("name", "?") for n in nets]
-    check(f"networks registered ({len(nets)})", len(nets) >= 10, json.dumps(names))
+    check(f"networks registered ({len(nets)})", len(nets) >= 11, json.dumps(names))
     # Probe results are nested under "probe" (live RPC chain-id check per network).
     def probed(n):
         p = n.get("probe") or {}
@@ -96,7 +96,7 @@ try:
     check(f"networks LIVE on real RPCs ({len(live)}/{len(nets)})", len(live) == len(nets),
           str([(n.get('name'), n.get('probe')) for n in nets if not probed(n)]))
     for want in ("base", "ethereum", "arbitrum", "polygon", "optimism", "bsc", "avalanche",
-                 "bitcoin", "solana", "tron"):
+                 "worldchain", "bitcoin", "solana", "tron"):
         check(f"  {want} present", any(want == n.get("name", "").lower() or want in json.dumps(n).lower()
                                        for n in nets))
 except Exception as e:

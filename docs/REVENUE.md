@@ -57,13 +57,20 @@ into the merchant relationship (enforced by key issuance); the on-chain
 ## Revenue lines
 
 1. **Processing fees** (above) — the core engine.
-2. **Instant conversion spread** — 40 bps default on
+2. **Wallet send fees** — 0.5% on external transfers made from the embedded
+   PayPhone Wallet (`#/wallet`), settled **on-chain as its own transaction**
+   to the treasury; transfers to PayPhone phone numbers are deliberately
+   **free** — the closed loop is the growth engine, external sends pay for
+   the rails. The fee constant is `WALLET_SEND_FEE_BPS` in
+   `src/lib/payphone/wallet.ts`; the security trade-offs are documented in
+   [WALLET.md](WALLET.md) (client-enforced until the contract-enforced v2).
+3. **Instant conversion spread** — 40 bps default on
    `GET /v1/quote`; funds conversion liquidity operations. Always returned
    to the caller as `spread_bps` / `revenue_usd` — never hidden.
-3. **Tier subscriptions** — optional; the included-volume thresholds make
+4. **Tier subscriptions** — optional; the included-volume thresholds make
    high-volume merchants upgrade naturally. Metering is stateless today
    (tier in the key) with on-chain metering in the FeeVault as the v2 path.
-4. **Commercial licenses** — the dual-licensing track: businesses that want
+5. **Commercial licenses** — the dual-licensing track: businesses that want
    to run modified or white-labeled PayPhone **without** the AGPL
    source-disclosure obligation buy a commercial license
    ([COMMERCIAL-LICENSE.md](../COMMERCIAL-LICENSE.md), from $290/yr).

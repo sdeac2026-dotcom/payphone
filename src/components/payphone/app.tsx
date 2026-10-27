@@ -19,7 +19,7 @@ import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 
 import dynamic from "next/dynamic";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
-import { BookOpen, Github, LayoutDashboard, Phone } from "lucide-react";
+import { BookOpen, Github, LayoutDashboard, Phone, Wallet } from "lucide-react";
 import { Logo, StatusDot } from "./bits";
 
 /**
@@ -34,6 +34,9 @@ const Dashboard = dynamic(() => import("./dashboard").then((m) => m.Dashboard), 
   loading: () => <ViewSkeleton />,
 });
 const Checkout = dynamic(() => import("./checkout").then((m) => m.Checkout), {
+  loading: () => <ViewSkeleton />,
+});
+const WalletView = dynamic(() => import("./wallet").then((m) => m.Wallet), {
   loading: () => <ViewSkeleton />,
 });
 const Docs = dynamic(() => import("./docs").then((m) => m.Docs), {
@@ -58,6 +61,7 @@ type Route =
   | { view: "landing" }
   | { view: "dashboard" }
   | { view: "docs" }
+  | { view: "wallet"; query: URLSearchParams }
   | { view: "checkout"; id: string; token: string };
 
 function parseHashFrom(rawHash: string): Route {
@@ -66,6 +70,9 @@ function parseHashFrom(rawHash: string): Route {
     const [id, query] = raw.slice(4).split("?");
     const token = new URLSearchParams(query ?? "").get("t") ?? "";
     if (id && token) return { view: "checkout", id, token };
+  }
+  if (raw.startsWith("wallet")) {
+    return { view: "wallet", query: new URLSearchParams(raw.split("?")[1] ?? "") };
   }
   if (raw.startsWith("dashboard")) return { view: "dashboard" };
   if (raw.startsWith("docs")) return { view: "docs" };
@@ -129,6 +136,9 @@ export function PayPhoneApp() {
           </button>
 
           <nav className="hidden items-center gap-1 md:flex" aria-label="Primary">
+            <Button variant="ghost" size="sm" onClick={() => go("#/wallet")}>
+              <Wallet className="mr-1.5 h-3.5 w-3.5" /> Wallet
+            </Button>
             <Button variant="ghost" size="sm" onClick={() => go("#/dashboard")}>
               <LayoutDashboard className="mr-1.5 h-3.5 w-3.5" /> Dashboard
             </Button>
@@ -157,6 +167,16 @@ export function PayPhoneApp() {
         {route.view === "dashboard" && <Dashboard onOpenCheckout={openCheckout} />}
         {route.view === "docs" && <Docs onOpenDashboard={() => go("#/dashboard")} />}
         {route.view === "checkout" && <Checkout invoiceId={route.id} token={route.token} />}
+        {route.view === "wallet" && (
+          <WalletView
+            prefill={{
+              network: route.query.get("network") ?? undefined,
+              asset: route.query.get("asset") ?? undefined,
+              to: route.query.get("to") ?? undefined,
+              amount: route.query.get("amount") ?? undefined,
+            }}
+          />
+        )}
       </main>
 
       {/* ---------------------------------------------------------- footer */}
@@ -167,13 +187,16 @@ export function PayPhoneApp() {
               <Logo />
               <p className="text-xs leading-relaxed text-muted-foreground">
                 Open, stateless crypto payment infrastructure. Built with Rust,
-                Next.js, Python and Solidity — MIT licensed, community extensible.
+                Next.js, Python and Solidity — AGPL-3.0 licensed, commercial
+                licenses available.
               </p>
             </div>
             <div className="grid grid-cols-2 gap-x-10 gap-y-1.5 text-sm">
               <span className="col-span-2 mb-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Product</span>
+              <button type="button" className="text-left text-muted-foreground hover:text-foreground" onClick={() => go("#/wallet")}>PayPhone Wallet</button>
               <button type="button" className="text-left text-muted-foreground hover:text-foreground" onClick={() => go("#/dashboard")}>Merchant console</button>
               <button type="button" className="text-left text-muted-foreground hover:text-foreground" onClick={() => go("#/docs")}>API docs</button>
+              <button type="button" className="text-left text-muted-foreground hover:text-foreground" onClick={() => go("#/docs")}>Licensing</button>
               <span className="col-span-2 mt-3 mb-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Developers</span>
               <button type="button" className="text-left text-muted-foreground hover:text-foreground" onClick={() => go("#/docs")}>Quickstart</button>
               <button type="button" className="text-left text-muted-foreground hover:text-foreground" onClick={() => go("#/docs")}>Webhooks</button>
@@ -181,7 +204,7 @@ export function PayPhoneApp() {
             <div className="space-y-2 text-xs text-muted-foreground">
               <StatusDot ok={engineOnline} label={`engine ${engineOnline ? "online" : "offline"}`} />
               <StatusDot ok={health?.oracle ?? null} label={`oracle ${health?.oracle ? "online" : health?.oracle === false ? "offline" : "…"}`} />
-              <p>MIT License · v0.1.0</p>
+              <p>AGPL-3.0 · commercial licenses available</p>
             </div>
           </div>
           <Separator className="my-6" />

@@ -20,10 +20,11 @@ import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
-  ArrowLeft, BadgeCheck, CheckCircle2, Clock, Coins, Info, Loader2,
-  Phone, Smartphone, TriangleAlert, Wallet,
+  ArrowLeft, BadgeCheck, CheckCircle2, Clock, Coins, ExternalLink, Info, Loader2,
+  Phone, ShieldCheck, Smartphone, TriangleAlert, Wallet,
 } from "lucide-react";
 import { api, shortHash, usd } from "@/lib/payphone/api";
+import { WALLET_CHAINS, walletAddress, walletIsUnlocked } from "@/lib/payphone/wallet";
 import type { InvoiceWithStatus } from "@/lib/payphone/types";
 import { Logo, MonoValue } from "./bits";
 
@@ -92,6 +93,30 @@ export function Checkout({ invoiceId, token }: { invoiceId: string; token: strin
     }
     return `ethereum:${invoice.address}@${invoice.network}?value=${qty}`;
   }, [invoice, isSimnet]);
+
+  async function payWithPayPhoneWallet() {
+    if (!invoice || !data) return;
+    setPaying(true);
+    setError("");
+    try {
+      // The user's own non-custodial wallet pays — same signed engine
+      // settlement as the demo path, but `from` is their real address.
+      // The engine settles the protocol fee as its own fee_tx to treasury.
+      await api.simnetPay({
+        to: invoice.address,
+        asset: invoice.asset,
+        amount_minor: Number(invoice.qte),
+        invoice_id: invoice.id,
+        from: walletAddress() ?? "demo-wallet",
+        token,
+      });
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Wallet payment failed");
+    } finally {
+      setPaying(false);
+    }
+  }
 
   async function simulateWalletPayment() {
     if (!invoice || !data) return;
@@ -240,6 +265,17 @@ export function Checkout({ invoiceId, token }: { invoiceId: string; token: strin
                     )}
                   </div>
 
+                  {/* Wallet pay — real EVM chains, wallet unlocked, network supported */}
+                  {!isSimnet && walletIsUnlocked() && WALLET_CHAINS.some((c) => c.name === invoice!.network) && (
+                    <Button variant="outline" className="w-full gap-2" asChild>
+                      <a
+                        href={`#/wallet?network=${invoice!.network}&asset=${encodeURIComponent(invoice!.asset)}&to=${invoice!.address}&amount=${encodeURIComponent(data?.asset_amount ?? "")}`}
+                      >
+                        <Wallet className="h-4 w-4" /> Pay from my PayPhone Wallet (prefilled)
+                      </a>
+                    </Button>
+                  )}
+
                   {/* Rate-lock note */}
                   <div className="flex items-start gap-2 rounded-lg bg-muted/40 p-3 text-xs text-muted-foreground">
                     <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" />
@@ -269,6 +305,17 @@ export function Checkout({ invoiceId, token }: { invoiceId: string; token: strin
                         {paying ? <Loader2 className="h-4 w-4 animate-spin" /> : <Wallet className="h-4 w-4" />}
                         Simulate wallet payment ({data?.asset_amount} {invoice!.asset})
                       </Button>
+                      {walletIsUnlocked() && walletAddress() && (
+                        <Button
+                          className="w-full gap-2 border-emerald-500/50 bg-emerald-500/10 text-emerald-700 hover:bg-emerald-500/20 dark:text-emerald-400"
+                          variant="outline"
+                          onClick={payWithPayPhoneWallet}
+                          disabled={paying}
+                        >
+                          {paying ? <Loader2 className="h-4 w-4 animate-spin" /> : <ShieldCheck className="h-4 w-4" />}
+                          Pay with MY PayPhone Wallet ({data?.asset_amount} {invoice!.asset})
+                        </Button>
+                      )}
                       <Separator />
                       <div className="space-y-2">
                         <Label className="text-xs text-muted-foreground">

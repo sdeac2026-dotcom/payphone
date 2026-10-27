@@ -880,6 +880,40 @@ async fn resolve_phone(
     })))
 }
 
+/// `POST /v1/identity/lookup` — PUBLIC, rate-limited phone → payment address
+/// resolution for the PayPhone Wallet and third-party clients. Deliberately
+/// narrower than `/v1/identity/resolve`: returns only what a payer needs to
+/// pay — the derived PayPhone ID / deterministic simnet address and, when the
+/// recipient registered one, their real payout wallet. No merchant auth
+/// required (a consumer wallet holds no API keys); rate-limited per looked-up
+/// number and the response carries no hash material.
+#[derive(Deserialize)]
+struct LookupReq {
+    phone: String,
+    #[serde(default)]
+    default_country: Option<String>,
+}
+
+async fn lookup_phone(State(state): Ctx, body: axum::body::Bytes) -> ApiResult<Response> {
+    let req: LookupReq = parse_body(&body)?;
+    let e164 = phone::normalize_e164(&req.phone, req.default_country.as_deref())?;
+    let hash = phone::phone_hash(&e164, &state.config.phone_pepper);
+    // Per-number rate limit — cheap ops, and probing the same number in a
+    // loop is throttled by the shared limiter budget.
+    guard(&state, &format!("lookup:{}", hash))?;
+    let pid = phone::payphone_id(&hash);
+    let sim_addr = phone::simnet_address(&hash, &state.config.signing_key);
+    let registered = state.simnet.as_ref().and_then(|s| s.resolve(&hash));
+    Ok(ok(json!({
+        "payphone_id": pid,
+        "masked_phone": mask_phone(&e164),
+        "simnet_address": sim_addr,
+        "registered": registered.is_some(),
+        "wallet": registered.as_ref().map(|r| r.wallet.clone()),
+        "privacy": "raw phone numbers are never logged or persisted — only this salted hash",
+    })))
+}
+
 #[derive(Deserialize)]
 struct RegisterReq {
     phone: String,
@@ -1180,6 +1214,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/fees/schedule", get(fee_schedule))
         .route("/v1/fees/quote", get(fee_quote))
         .route("/v1/identity/resolve", post(resolve_phone))
+        .route("/v1/identity/lookup", post(lookup_phone))
         .route("/v1/identity/register", post(register_phone))
         .route("/v1/identity/escrow", post(create_escrow))
         .route("/v1/identity/claim", post(claim_escrow))

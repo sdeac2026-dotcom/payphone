@@ -332,6 +332,19 @@ async function handle(method: string, path: string, body: Body, creds: { pk: str
       wallet: reg?.wallet };
   }
 
+  if (routeKey === "POST /identity/lookup") {
+    // Public, wallet-facing variant of resolve (no auth) — demo mirror.
+    const phone = String(body?.phone ?? "").replace(/[^\d+]/g, "");
+    const phoneHash = await sha256Hex(`demo-salt|${phone}`);
+    const reg = s.registry[phoneHash];
+    const pid = reg?.payphone_id ?? `ph_${(await sha256Hex(phoneHash)).slice(0, 16)}`;
+    return { payphone_id: pid,
+      masked_phone: `+•••• ••${phone.slice(-2)}`,
+      simnet_address: await deriveSimnetAddress(pid), registered: Boolean(reg),
+      wallet: reg?.wallet ?? null,
+      privacy: "raw phone numbers are never logged or persisted — only this salted hash" };
+  }
+
   if (routeKey === "POST /identity/register") {
     const phone = String(body?.phone ?? "").replace(/[^\d+]/g, "");
     const wallet = String(body?.wallet ?? "");

@@ -10,10 +10,13 @@
 //!   public endpoints rate-limit aggressively).
 //!
 //! Verification history (2026-10, live on-chain checks):
-//! - `eth_chainId` correct on all seven networks,
+//! - `eth_chainId` correct on every network,
 //! - every token entry below passed an on-chain `symbol()`+`decimals()` probe
 //!   on its own network (candidates that failed were DROPPED, never guessed),
 //! - `eth_getLogs` Transfer queries returned real payments on all networks.
+//! - worldchain (chain 480) added 2026-10-27: `eth_chainId` = 0x1e0 on the
+//!   official Alchemy public RPC; USDC / USDT0 / WLD each passed a live
+//!   `symbol()`+`decimals()` probe (explorer cross-checked worldscan.org).
 //!
 //! Adding a network = one `NetworkSpec` entry. Adding a token = one
 //! `TokenSpec` entry (verified). Adding an invoice-able asset = one
@@ -55,7 +58,7 @@ macro_rules! tokens {
     };
 }
 
-/// The seven production EVM mainnets. Token addresses below were verified
+/// The eight production EVM mainnets. Token addresses below were verified
 /// on-chain (symbol + decimals) during the 2026-10 registry build; see the
 /// module header for the two-source rule.
 pub const NETWORKS: &[NetworkSpec] = &[
@@ -208,6 +211,22 @@ pub const NETWORKS: &[NetworkSpec] = &[
             "TUSD"  => ("0x1C20E891BaB6b1727d14Da358FAe2984Ed9B59eb", 18),
         ],
     },
+    NetworkSpec {
+        // World Chain — the World ID rollup (OP Stack, settlement on Ethereum).
+        // 2s blocks; 8 confs ≈ 16s. Native USDC (Circle, 2025-06) + Tether's
+        // official omnichain USDT0 + WLD, all probed on-chain at add time.
+        name: "worldchain",
+        chain_id: 480,
+        native: "ETH",
+        confirmations: 8,
+        public_rpc: "https://worldchain-mainnet.g.alchemy.com/public",
+        explorer_tx: "https://worldscan.org/tx/",
+        tokens: tokens![
+            "USDC"  => ("0x79A02482A880bCE3F13e09Da970dC34db4CD24d1", 6),
+            "USDT0" => ("0x102d758f688a4C1C5a80b116bD945d4455460282", 6),
+            "WLD"   => ("0x2cFc85d8E48F8EAB294be644d9E25C3030863003", 18),
+        ],
+    },
 ];
 
 /// Solana assets (SPL tokens). Native SOL carries no entry — the Solana
@@ -355,6 +374,8 @@ pub const ASSET_CATALOG: &[AssetSpec] = &[
     AssetSpec { symbol: "CAKE",  name: "PancakeSwap",             default_chain: "evm",     default_network: "bsc",       decimals: 18 },
     AssetSpec { symbol: "BTCB",  name: "Binance-Peg Bitcoin",     default_chain: "evm",     default_network: "bsc",       decimals: 18 },
     AssetSpec { symbol: "WAVAX", name: "Wrapped AVAX",            default_chain: "evm",     default_network: "avalanche", decimals: 18 },
+    AssetSpec { symbol: "WLD",   name: "Worldcoin",               default_chain: "evm",     default_network: "worldchain", decimals: 18 },
+    AssetSpec { symbol: "USDT0", name: "Tether USDT0 (Omnichain)", default_chain: "evm",     default_network: "worldchain", decimals: 6 },
     // ---- quote-only (priced for /v1/quote; invoice settlement pending an adapter) ----
     AssetSpec { symbol: "XRP",  name: "XRP",                  default_chain: "none", default_network: "", decimals: 6 },
     AssetSpec { symbol: "DOGE", name: "Dogecoin",             default_chain: "none", default_network: "", decimals: 8 },
@@ -406,7 +427,7 @@ pub fn settleable_networks(asset: &str) -> Vec<(&'static str, &'static str)> {
     out
 }
 
-/// Native-asset decimals for an EVM network (all seven use 18).
+/// Native-asset decimals for an EVM network (all eight use 18).
 pub fn native_decimals(network: &str) -> u8 {
     let _ = find(network); // errors out via callers when the network is unknown
     18
@@ -417,8 +438,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn all_seven_mainnets_registered() {
-        assert_eq!(NETWORKS.len(), 7);
+    fn all_eight_mainnets_registered() {
+        assert_eq!(NETWORKS.len(), 8);
         assert_eq!(find("base").unwrap().chain_id, 8453);
         assert_eq!(find("ETHEREUM").unwrap().chain_id, 1);
         assert_eq!(find("arbitrum").unwrap().chain_id, 42161);
@@ -426,7 +447,26 @@ mod tests {
         assert_eq!(find("optimism").unwrap().chain_id, 10);
         assert_eq!(find("bsc").unwrap().chain_id, 56);
         assert_eq!(find("avalanche").unwrap().chain_id, 43114);
+        assert_eq!(find("WORLDCHAIN").unwrap().chain_id, 480);
+        assert_eq!(find("worldchain").unwrap().native, "ETH");
         assert!(find("sepolia").is_none(), "testnets are not shipped by default");
+    }
+
+    #[test]
+    fn worldchain_tokens_resolve() {
+        let wld = resolve_token("worldchain", "WLD").unwrap();
+        assert_eq!(wld.decimals, 18);
+        assert_eq!(wld.address.to_lowercase(), "0x2cfc85d8e48f8eab294be644d9e25c3030863003");
+        let usdc = resolve_token("worldchain", "USDC").unwrap();
+        assert_eq!(usdc.decimals, 6, "native Circle USDC on worldchain is 6dp");
+        let usdt0 = resolve_token("worldchain", "usdt0").unwrap();
+        assert_eq!(usdt0.decimals, 6);
+        // Native ETH resolves to no ERC-20, like every other network.
+        assert!(resolve_token("worldchain", "ETH").is_none());
+        // WLD settles ONLY on worldchain (its home network).
+        assert_eq!(settleable_networks("WLD"), vec![("evm", "worldchain")]);
+        // USDT (plain) must NOT resolve on worldchain — there it is USDT0.
+        assert!(resolve_token("worldchain", "USDT").is_none());
     }
 
     #[test]
@@ -503,7 +543,7 @@ mod tests {
         let btc = settleable_networks("BTC");
         assert_eq!(btc, vec![("bitcoin", "mainnet")]);
         let eth = settleable_networks("ETH");
-        assert_eq!(eth.len(), 5, "ETH native on five EVM networks: {eth:?}");
+        assert_eq!(eth.len(), 6, "ETH native on six EVM networks: {eth:?}");
         // Quote-only asset settles nowhere.
         assert!(settleable_networks("XRP").is_empty());
     }

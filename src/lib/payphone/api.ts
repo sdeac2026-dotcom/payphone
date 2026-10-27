@@ -279,6 +279,20 @@ export const api = {
       wallet?: string;
     }>("POST", "/identity/resolve", { phone }, creds),
 
+  /**
+   * PUBLIC phone → payment-address resolution (no merchant keys needed).
+   * Powers the PayPhone Wallet's fee-free phone-number loop: any client can
+   * resolve "pay +254…" to the recipient's address without an account.
+   */
+  identityLookup: (phone: string) =>
+    request<{
+      payphone_id: string;
+      masked_phone: string;
+      simnet_address: string;
+      registered: boolean;
+      wallet: string | null;
+    }>("POST", "/identity/lookup", { phone }),
+
   registerPhone: (phone: string, wallet: string, creds: { pk: string; sk: string }) =>
     request<{ payphone_id: string; wallet: string; tx: { height: number; hash: string } }>(
       "POST",

@@ -117,7 +117,7 @@ cd services/oracle-py && pip install -r requirements.txt
 | `PAYPHONE_SIGNING_KEY` | **yes** | Invoice token + webhook signatures |
 | `PAYPHONE_PHONE_PEPPER` | **yes** | Phone-hash privacy |
 | `PAYPHONE_SIMNET` | prod: `0` | Disable the demo chain |
-| `EVM_RPC_BASE` / `_ETHEREUM` / `_ARBITRUM` / `_POLYGON` / `_OPTIMISM` / `_BSC` / `_AVALANCHE` | optional | Override the default **public mainnet** RPC per network. All seven EVM mainnets work out of the box on public endpoints (rate-limited); use indexed providers (Alchemy, QuickNode, PublicNode) for production volume. Legacy `EVM_RPC_MAINNET` aliases to ethereum. |
+| `EVM_RPC_BASE` / `_ETHEREUM` / `_ARBITRUM` / `_POLYGON` / `_OPTIMISM` / `_BSC` / `_AVALANCHE` / `_WORLDCHAIN` | optional | Override the default **public mainnet** RPC per network. All eight EVM mainnets work out of the box on public endpoints (rate-limited); use indexed providers (Alchemy, QuickNode, PublicNode) for production volume. Worldchain's default is the official Alchemy public endpoint. Legacy `EVM_RPC_MAINNET` aliases to ethereum. |
 | `BTC_API_BASE` | optional | Esplora API for Bitcoin watch-only settlement. Default `https://blockstream.info/api` (confirmed-balance deltas + explorer receipts). Any Esplora-compatible host works; mempool.space mirrors are drop-in. |
 | `SOL_RPC_URL` | optional | Solana JSON-RPC for SOL / SPL (USDC) watch-only settlement. Default `https://api.mainnet-beta.solana.com` (aggressively rate-limited — use Helius/QuickNode for volume). |
 | `TRON_API_BASE` | optional | TronGrid base for TRX / TRC-20 (USDT) watch-only settlement. Default `https://api.trongrid.io`; free tier throttles deep pagination — TronPro lifts it. |

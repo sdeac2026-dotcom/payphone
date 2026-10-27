@@ -24,7 +24,6 @@ const nextConfig: NextConfig = {
   },
   reactStrictMode: false,
   turbopack: {
-    memoryLimit: 1280,
     // Pin the workspace root to THIS package. Without it, Turbopack walks up
     // the directory tree hunting for lockfiles — inside a monorepo checkout
     // (or a sibling staging clone) it can infer the wrong root and nest the
