@@ -33,11 +33,11 @@ import {
 import { QRCodeSVG } from "qrcode.react";
 import { SendRightNotice } from "./asset-safety";
 import {
-  WALLET_CHAINS, activityLog, feePreview, walletAddress, walletAddressStored,
+  WALLET_CHAINS, activityLog, explainSendError, feePreview, gasPreview, walletAddress, walletAddressStored,
   walletBalances, walletCreate, walletDestroy, walletExists,
   walletImportMnemonic, walletImportPrivateKey, walletIsUnlocked, walletLock,
   walletRevealSecret, walletSend, resolveRecipient, walletUnlock,
-  type Recipient, type SendResult, type TokenBalance, type WalletActivity,
+  type GasPreview, type Recipient, type SendResult, type TokenBalance, type WalletActivity,
 } from "@/lib/payphone/wallet";
 import { WALLET_SEND_FEE_BPS } from "@/lib/payphone/wallet";
 import { api, ApiError, type WalletActivityAll } from "@/lib/payphone/api";
@@ -51,6 +51,13 @@ export interface WalletPrefill {
 
 function short(a: string): string {
   return a.length > 15 ? `${a.slice(0, 8)}…${a.slice(-6)}` : a;
+}
+
+/** Network fees live far below everyday decimals — print them honestly. */
+function fmtFee(q: string): string {
+  const n = Number(q);
+  if (!Number.isFinite(n) || n === 0) return "0";
+  return n < 0.0001 ? n.toFixed(8) : n.toFixed(6);
 }
 
 export function Wallet({ prefill }: { prefill?: WalletPrefill }) {
@@ -302,6 +309,28 @@ function WalletMain({ prefill, onChanged }: { prefill?: WalletPrefill; onChanged
   useEffect(() => { loadBalances(); }, [loadBalances]);
   useEffect(() => { setActivity(activityLog()); }, []);
 
+  // ---- network-fee preview: tell the gas story BEFORE anyone hits a wall --
+  // The #1 send failure for a new self-custody wallet: tokens arrive (WLD,
+  // USDC…) but the chain's NATIVE coin balance is zero — and without native
+  // coin there is no gas. This preview surfaces the exact fee up front and,
+  // when the native balance can't cover it, calmly explains the one-step fix
+  // (top up a little native coin on THIS network) instead of letting a raw
+  // viem trace do the talking.
+  const [gasInfo, setGasInfo] = useState<GasPreview | null>(null);
+  useEffect(() => {
+    let live = true;
+    setGasInfo(null);
+    (async () => {
+      try {
+        const g = await gasPreview(chain, asset, balances ?? []);
+        if (live) setGasInfo(g);
+      } catch {
+        if (live) setGasInfo(null);
+      }
+    })();
+    return () => { live = false; };
+  }, [chain, asset, balances]);
+
   // ---- money radar: every transfer, EVERY network, live from the chain -----
   // One scan fans out across all supported EVM networks and reports every
   // token transfer touching this address — incoming AND outgoing — each
@@ -402,7 +431,8 @@ function WalletMain({ prefill, onChanged }: { prefill?: WalletPrefill; onChanged
       toast({ title: "Transaction signed & broadcast", description: `${amount} ${asset} → ${r.resolved.kind === "internal" ? r.resolved.maskedPhone : short(r.resolved.address)}` });
       setTimeout(loadBalances, 4000);
     } catch (e) {
-      toast({ title: "Send failed", description: String((e as Error).message ?? e), variant: "destructive" });
+      // Human language only — raw viem/engine traces never reach a user.
+      toast({ title: "Send not completed", description: explainSendError(e, chain, asset), variant: "destructive" });
     } finally {
       setSending(false);
     }
@@ -518,6 +548,21 @@ function WalletMain({ prefill, onChanged }: { prefill?: WalletPrefill; onChanged
                 <div className="flex justify-between"><span className="text-muted-foreground">Network gas</span><span className="text-xs">paid to {chain.label} validators</span></div>
               </div>
             )}
+            {gasInfo && (
+              <div className={`rounded-md border px-3 py-2 text-xs ${gasInfo.affordable ? "border-emerald-500/30 bg-emerald-500/5" : "border-amber-500/40 bg-amber-500/5"}`}>
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Network fee on {chain.label}</span>
+                  <span className="font-mono">≈ {fmtFee(gasInfo.feeQty)} {gasInfo.nativeSymbol}</span>
+                </div>
+                {!gasInfo.affordable && (
+                  <p className="mt-1.5 leading-relaxed text-amber-700">
+                    Your wallet holds tokens but no {gasInfo.nativeSymbol} on {chain.label} yet — the network fee is paid in
+                    {" "}{gasInfo.nativeSymbol}. Your {asset} is safe and untouched. Top up a little {gasInfo.nativeSymbol} to your
+                    address (on your exchange, withdraw with the <b>{chain.label}</b> network selected), then send.
+                  </p>
+                )}
+              </div>
+            )}
             <Button className="w-full" disabled={!resolved || !amount || sending || parseFloat(amount) <= 0} onClick={send}>
               {sending ? "Signing & broadcasting…" : "Review & send"}
             </Button>
@@ -563,8 +608,9 @@ function WalletMain({ prefill, onChanged }: { prefill?: WalletPrefill; onChanged
         <CardContent className="space-y-2">
           {radarErr && (
             <p className="text-xs text-amber-600">
-              {radarErr} The radar keeps retrying on its own — your funds are on-chain and
-              unaffected either way.
+              The radar couldn&apos;t refresh just now — the free-tier network can take up to a minute to wake
+              up. It keeps retrying on its own; your funds are on-chain and unaffected either way.
+              {process.env.NODE_ENV === "development" ? ` [dev: ${radarErr}]` : ""}
             </p>
           )}
           {radar && radar.scanned_networks.length > 0 && (

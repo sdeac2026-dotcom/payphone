@@ -389,6 +389,114 @@ export async function feePreview(amountQty: bigint, internal: boolean): Promise<
   return { internal, bps, feeQty, treasury, treasuryConfigured };
 }
 
+// --------------------------------------------- gas preview & human errors --
+
+export interface GasPreview {
+  nativeSymbol: string;
+  nativeBalance: string;
+  feeQty: string; // human-readable native units
+  affordable: boolean;
+}
+
+/**
+ * Network-fee preview for the send card: what one transfer on this chain
+ * costs in the native coin, and whether the wallet's native balance covers
+ * it. Gas for an ERC-20 transfer barely varies with the amount (a native
+ * transfer is a fixed 21 000), so estimating with a unit amount gives an
+ * honest figure without re-estimating on every keystroke. Returns null when
+ * the estimate is unavailable right now (RPC hiccup, empty token balance) —
+ * the send-time pre-flight below remains the hard guard.
+ */
+export async function gasPreview(
+  c: WalletChain,
+  asset: string,
+  tokens: { symbol: string; address?: string }[]
+): Promise<GasPreview | null> {
+  const account = requireAccount();
+  const { publicClient } = clients(c);
+  const isNative = asset.toLowerCase() === c.native.toLowerCase();
+  const token = isNative ? undefined : tokens.find((t) => t.symbol.toLowerCase() === asset.toLowerCase() && t.address);
+  if (!isNative && !token) return null;
+  try {
+    const unit = parseUnits("1", 18);
+    const [gas, fees, balance] = await Promise.all([
+      isNative
+        ? publicClient.estimateGas({ account: account.address, to: account.address, value: unit })
+        : publicClient.estimateGas({
+            account: account.address,
+            to: token!.address as `0x${string}`,
+            data: encodeFunctionData({ abi: erc20Abi, functionName: "transfer", args: [account.address, unit] }),
+          }),
+      publicClient.estimateFeesPerGas(),
+      publicClient.getBalance({ address: account.address }),
+    ]);
+    const maxFee = fees.maxFeePerGas ?? fees.gasPrice;
+    if (maxFee === undefined) return null;
+    const feeQty = gas * maxFee;
+    return {
+      nativeSymbol: c.native,
+      nativeBalance: formatUnits(balance, 18),
+      feeQty: formatUnits(feeQty, 18),
+      affordable: balance > feeQty,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Why a send can't proceed, in language a non-crypto-native person can act
+ * on. The #1 real-world case: the wallet holds a token (WLD, USDC…) but zero
+ * of the chain's native coin — and without native coin there is no way to
+ * pay the network fee. To its user that is not a viem stack trace, it is
+ * "you need a tiny top-up of the network's own coin".
+ */
+export function gasMessage(c: WalletChain, asset: string): string {
+  const isNative = asset.toLowerCase() === c.native.toLowerCase();
+  return isNative
+    ? `Not enough ${c.native} on ${c.label} — the amount plus the network fee is more than your balance. Lower the amount, or top up a little ${c.native} on ${c.label} and try again.`
+    : `To send ${asset} on ${c.label} you also need a small amount of ${c.native} for the network fee (usually well under a cent). Your ${asset} is safe and untouched. Top up a little ${c.native} to your address — from your exchange, withdraw with the ${c.label} network selected — then send again.`;
+}
+
+/**
+ * Map ANY send failure to calm, actionable language. Raw library and engine
+ * text (viem traces, "cd engine && cargo run --release") never reaches a
+ * user again; in local development the raw detail is appended in brackets
+ * for debugging.
+ */
+export function explainSendError(e: unknown, c: WalletChain, asset: string): string {
+  const raw = String((e as Error)?.message ?? e);
+  const low = raw.toLowerCase();
+  const dev = process.env.NODE_ENV === "development" ? ` [dev: ${raw}]` : "";
+  if (
+    low.includes("exceeds the balance of the account") ||
+    low.includes("exceeds available funds") ||
+    low.includes("insufficient funds for gas") ||
+    low.includes("cost of executing this transaction")
+  ) {
+    return gasMessage(c, asset);
+  }
+  if (low.includes("transfer amount exceeds balance") || low.includes("insufficient token balance")) {
+    return `Not enough ${asset} to send that amount — check your ${asset} balance above. Nothing left your wallet.`;
+  }
+  if (low.includes("engine unreachable") || low.includes("engine_offline")) {
+    return "PayPhone's coordination network is waking up (the free tier can take up to a minute). Nothing was sent — try again in a moment.";
+  }
+  if (low.includes("user rejected") || low.includes("request denied") || low.includes("4001")) {
+    return "You declined the transaction — nothing was sent and nothing changed.";
+  }
+  if (low.includes("nonce")) {
+    return "The network saw a conflicting transaction from this wallet. Wait a few seconds and send again — nothing was duplicated.";
+  }
+  if (
+    low.includes("fetch") || low.includes("network") || low.includes("timeout") ||
+    low.includes("socket") || low.includes("rate limit") || low.includes("429")
+  ) {
+    return `Couldn't reach the ${c.label} network just now. Nothing was sent — try again in a moment.`;
+  }
+  return `The send didn't go through — nothing left your wallet.${dev}`;
+}
+
 // -------------------------------------------------------------- recipients --
 
 export type Recipient =
@@ -484,7 +592,7 @@ export async function walletSend(req: SendRequest): Promise<SendResult> {
 
   // Pre-flight: balance must cover amount + fee (+ gas headroom for native).
   if (isNative && fee.feeQty > 0n && amountQty + fee.feeQty * 3n > (await publicClient.getBalance({ address: account.address }))) {
-    throw new Error("Balance too low for amount + protocol fee + gas.");
+    throw new Error(gasMessage(c, req.asset));
   }
 
   // ONE nonce decision for the whole send. The payment and (optional) fee tx
@@ -495,10 +603,10 @@ export async function walletSend(req: SendRequest): Promise<SendResult> {
   const baseNonce = await publicClient.getTransactionCount({ address: account.address, blockTag: "pending" });
 
   if (isNative) {
-    const hash = await sendNative(publicClient, walletClient, account, c, resolved.address as `0x${string}`, amountQty, baseNonce);
+    const hash = await sendNative(publicClient, walletClient, account, c, req.asset, resolved.address as `0x${string}`, amountQty, baseNonce);
     txs.push({ hash, role: "payment", to: resolved.address, qty: req.amount });
   } else {
-    const hash = await sendToken(publicClient, walletClient, account, c, token!.address as `0x${string}`, resolved.address as `0x${string}`, amountQty, baseNonce);
+    const hash = await sendToken(publicClient, walletClient, account, c, req.asset, token!.address as `0x${string}`, resolved.address as `0x${string}`, amountQty, baseNonce);
     txs.push({ hash, role: "payment", to: resolved.address, qty: req.amount });
   }
 
@@ -506,8 +614,8 @@ export async function walletSend(req: SendRequest): Promise<SendResult> {
   if (fee.feeQty > 0n && fee.treasury) {
     const feeHuman = formatUnits(fee.feeQty, decimals);
     const feeHash = isNative
-      ? await sendNative(publicClient, walletClient, account, c, fee.treasury as `0x${string}`, fee.feeQty, baseNonce + 1)
-      : await sendToken(publicClient, walletClient, account, c, token!.address as `0x${string}`, fee.treasury as `0x${string}`, fee.feeQty, baseNonce + 1);
+      ? await sendNative(publicClient, walletClient, account, c, req.asset, fee.treasury as `0x${string}`, fee.feeQty, baseNonce + 1)
+      : await sendToken(publicClient, walletClient, account, c, req.asset, token!.address as `0x${string}`, fee.treasury as `0x${string}`, fee.feeQty, baseNonce + 1);
     txs.push({ hash: feeHash, role: "fee", to: fee.treasury, qty: feeHuman });
   }
 
@@ -525,11 +633,34 @@ export async function walletSend(req: SendRequest): Promise<SendResult> {
   return result;
 }
 
+/**
+ * Pre-flight the ONE failure users actually hit: a wallet can hold plenty of
+ * a token yet zero of the chain's native coin — and without native coin the
+ * network fee cannot be paid, so the broadcast dies with viem's "total cost
+ * exceeds the balance" trace. Catch it BEFORE signing, in plain language,
+ * with the fix. (The optional protocol-fee tx is smaller than the payment,
+ * so covering the payment's fee implies covering it.)
+ */
+async function assertGasAffordable(
+  publicClient: ReturnType<typeof createPublicClient>,
+  address: `0x${string}`,
+  c: WalletChain,
+  asset: string,
+  gas: bigint,
+  fees: { maxFeePerGas?: bigint; maxPriorityFeePerGas?: bigint; gasPrice?: bigint }
+): Promise<void> {
+  const maxFee = fees.maxFeePerGas ?? fees.gasPrice;
+  if (maxFee === undefined) return;
+  const balance = await publicClient.getBalance({ address });
+  if (gas * maxFee > balance) throw new Error(gasMessage(c, asset));
+}
+
 async function sendNative(
   publicClient: ReturnType<typeof createPublicClient>,
   walletClient: ReturnType<typeof createWalletClient>,
   account: LocalAccount,
   c: WalletChain,
+  asset: string,
   to: `0x${string}`,
   qty: bigint,
   nonce: number
@@ -538,6 +669,7 @@ async function sendNative(
     publicClient.estimateGas({ account: account.address, to, value: qty }),
     publicClient.estimateFeesPerGas(),
   ]);
+  await assertGasAffordable(publicClient, account.address, c, asset, gas, fees);
   return walletClient.sendTransaction({
     to,
     value: qty,
@@ -555,6 +687,7 @@ async function sendToken(
   walletClient: ReturnType<typeof createWalletClient>,
   account: LocalAccount,
   c: WalletChain,
+  asset: string,
   token: `0x${string}`,
   to: `0x${string}`,
   qty: bigint,
@@ -569,6 +702,7 @@ async function sendToken(
     publicClient.estimateGas({ account: account.address, to: token, data }),
     publicClient.estimateFeesPerGas(),
   ]);
+  await assertGasAffordable(publicClient, account.address, c, asset, gas, fees);
   const hash = await walletClient.writeContract({
     address: token,
     abi: erc20Abi,
