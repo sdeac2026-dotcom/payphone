@@ -64,9 +64,11 @@ const ACTIVITY_TRANSFER_CAP: usize = 500;
 /// Default / maximum lookback window (blocks) for an activity scan.
 pub const DEFAULT_ACTIVITY_WINDOW: u64 = 2_000;
 pub const MAX_ACTIVITY_WINDOW: u64 = 20_000;
-/// Response cache TTL for activity scans (dashboard polls every ~15 s;
-/// overlapping polls within 5 s share one chain read).
-const ACTIVITY_CACHE_TTL: Duration = Duration::from_secs(5);
+/// Response cache TTL for activity scans (dashboard polls ~15 s, wallet
+/// ~20 s; a 15 s TTL means consecutive polls share one chain read instead
+/// of re-fanning-out every time — sustained re-scanning is exactly the
+/// gateway pressure that slows scans down for everyone).
+const ACTIVITY_CACHE_TTL: Duration = Duration::from_secs(15);
 
 /// Which transfers an activity scan returns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

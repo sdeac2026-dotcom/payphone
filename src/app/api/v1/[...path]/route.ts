@@ -38,14 +38,25 @@ async function proxy(req: NextRequest, ctx: { params: Promise<{ path: string[] }
   const method = req.method;
   const body = method === "GET" || method === "HEAD" ? undefined : await req.text();
 
+  // Read-only activity scans fan out across EVERY configured EVM network
+  // through the RPC mesh and can legitimately take 10-20 s under gateway
+  // pressure (adaptive chunks, failover, cooldowns). Killing them at 8 s
+  // made the wallet radar show "engine unreachable" on every uncached poll
+  // — the exact "explorer sees it, PayPhone doesn't" anxiety this feature
+  // exists to prevent. Scans get 30 s; everything else stays snappy at 8 s.
+  const joined = path.join("/");
+  const isActivityScan =
+    method === "GET" &&
+    (joined === "wallet/activity" || /^wallet\/[^/]+\/activity$/.test(joined));
+  const timeoutMs = isActivityScan ? 30_000 : 8_000;
+
   try {
     const upstream = await fetch(target, {
       method,
       headers,
       body,
       cache: "no-store",
-      // 8s ceiling keeps the UI responsive if the engine hiccups.
-      signal: AbortSignal.timeout(8000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
 
     const respHeaders = new Headers();
@@ -61,12 +72,14 @@ async function proxy(req: NextRequest, ctx: { params: Promise<{ path: string[] }
       headers: respHeaders,
     });
   } catch {
+    // Production-safe copy: the wallet auto-polls and self-heals, so the
+    // user needs reassurance, not shell commands.
     return NextResponse.json(
       {
         error: {
           type: "engine_offline",
           message:
-            "PayPhone Engine unreachable. Start it with: cd engine && cargo run --release (or ./scripts/supervise.sh)",
+            "PayPhone engine briefly unreachable — waking or restarting. Reconnecting automatically.",
           code: 503,
         },
       },

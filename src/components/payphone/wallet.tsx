@@ -14,7 +14,7 @@
  * simnet-mode demo invoices — settlement requests that carry no secrets.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -309,12 +309,25 @@ function WalletMain({ prefill, onChanged }: { prefill?: WalletPrefill; onChanged
   // used, never the one any UI picked). "Picked Optimism, the exchange sent
   // on World Chain" still shows the money, with its explorer link, within
   // ~20 s — no refresh, no support ticket, no "where is my money".
+  //
+  // Resilience: if the engine is mid-restart (host recycle), the first
+  // failures surface as a calm "reconnecting" note, not an error wall — the
+  // radar fast-retries at +2.5 s and +7 s before falling back to the 20 s
+  // cadence, so recovery feels instant once the engine is back.
+  const radarRetries = useRef(0);
+  const radarTimer = useRef<number | null>(null);
+  const loadRadarRef = useRef<() => Promise<void>>(async () => {});
   const loadRadar = useCallback(async () => {
     if (!addr) return;
+    if (radarTimer.current !== null) {
+      window.clearTimeout(radarTimer.current);
+      radarTimer.current = null;
+    }
     setRadarBusy(true);
     setRadarErr(null);
     try {
       setRadar(await api.walletActivityAll(addr, { direction: "both" }));
+      radarRetries.current = 0;
     } catch (e) {
       // Static-demo build (GitHub Pages): the in-browser demo engine has no
       // live chain behind it — show the calm empty state, never an error.
@@ -324,6 +337,12 @@ function WalletMain({ prefill, onChanged }: { prefill?: WalletPrefill; onChanged
           transfers: [], transfer_count: 0, native_balances: [], block_time_secs: {},
           notes: [], scanned_at: 0, cache: "miss",
         });
+      } else if (
+        e instanceof ApiError && e.type === "engine_offline" && radarRetries.current < 2
+      ) {
+        radarRetries.current += 1;
+        const delay = radarRetries.current === 1 ? 2_500 : 7_000;
+        radarTimer.current = window.setTimeout(() => void loadRadarRef.current(), delay);
       } else {
         setRadarErr(String((e as Error).message ?? e));
       }
@@ -331,6 +350,15 @@ function WalletMain({ prefill, onChanged }: { prefill?: WalletPrefill; onChanged
       setRadarBusy(false);
     }
   }, [addr]);
+  loadRadarRef.current = loadRadar;
+
+  // Cancel any pending fast-retry when the address changes or on unmount.
+  useEffect(
+    () => () => {
+      if (radarTimer.current !== null) window.clearTimeout(radarTimer.current);
+    },
+    []
+  );
 
   useEffect(() => { loadRadar(); }, [loadRadar]);
   useEffect(() => {
@@ -535,7 +563,8 @@ function WalletMain({ prefill, onChanged }: { prefill?: WalletPrefill; onChanged
         <CardContent className="space-y-2">
           {radarErr && (
             <p className="text-xs text-amber-600">
-              Radar hiccup ({radarErr}) — balances are unaffected; it retries automatically.
+              {radarErr} The radar keeps retrying on its own — your funds are on-chain and
+              unaffected either way.
             </p>
           )}
           {radar && radar.scanned_networks.length > 0 && (
