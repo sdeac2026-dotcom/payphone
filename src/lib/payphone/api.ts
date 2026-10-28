@@ -40,6 +40,42 @@ export class ApiError extends Error {
   }
 }
 
+/** One on-chain transfer touching a watched address (multi-network scan). */
+export interface ActivityTransfer {
+  network: string;
+  chain_id: number | null;
+  direction: "in" | "out";
+  asset: string | null;
+  asset_address: string;
+  decimals: number;
+  qty: string;
+  qty_base: string;
+  counterparty: string;
+  tx_hash: string;
+  block: number;
+  log_index: string;
+  confirmations: number;
+  required_confirmations: number;
+  confirmed: boolean;
+  status: string;
+  explorer_url: string;
+}
+
+/** Response of `GET /v1/wallet/:address/activity` — full transfer visibility. */
+export interface WalletActivityAll {
+  address: string;
+  window_blocks: number;
+  scanned_networks: string[];
+  skipped_networks: { network: string; note: string }[];
+  transfers: ActivityTransfer[];
+  transfer_count: number;
+  native_balances: { network: string; asset: string; qty: string }[];
+  block_time_secs: Record<string, number>;
+  notes: string[];
+  scanned_at: number;
+  cache: "hit" | "miss";
+}
+
 async function unwrap<T>(resp: Response): Promise<T> {
   const body = await resp.json().catch(() => ({}));
   if (!resp.ok) {
@@ -354,6 +390,28 @@ export const api = {
       "GET",
       `/wallet/activity?network=${encodeURIComponent(network)}&address=${encodeURIComponent(address)}&blocks=${blocks}`
     ),
+
+  /**
+   * Full-visibility activity scan (superset of walletActivity): ONE call
+   * fans out across EVERY configured EVM network, both directions, any
+   * token. Each row names the network the transfer ACTUALLY landed on —
+   * the network the sender used — so "picked Optimism, sent on World
+   * Chain" still shows the money with an explorer link. Public chain data.
+   */
+  walletActivityAll: (
+    address: string,
+    opts?: { blocks?: number; direction?: "in" | "out" | "both"; networks?: string }
+  ) => {
+    const p = new URLSearchParams();
+    if (opts?.blocks) p.set("blocks", String(opts.blocks));
+    if (opts?.direction) p.set("direction", opts.direction);
+    if (opts?.networks) p.set("networks", opts.networks);
+    const qs = p.toString();
+    return request<WalletActivityAll>(
+      "GET",
+      `/wallet/${encodeURIComponent(address)}/activity${qs ? `?${qs}` : ""}`
+    );
+  },
 
   // --------------------------------------------------------------- simnet ----
 

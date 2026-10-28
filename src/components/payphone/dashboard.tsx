@@ -19,7 +19,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 import {
-  Activity, ArrowUpRight, Blocks, Copy, CreditCard, ExternalLink, Eye, EyeOff,
+  Activity as ActivityIcon, ArrowDownLeft, ArrowUpRight, Blocks, Copy, CreditCard, ExternalLink, Eye, EyeOff,
   Fingerprint, Globe, KeyRound, Link2, Phone, Plus, RefreshCw, Send, ShieldCheck,
   Trash2, TrendingUp, Webhook, Zap,
 } from "lucide-react";
@@ -27,6 +27,7 @@ import {
   api, invoiceStore, session as store, setAdminToken, shortHash, usd,
   ApiError,
   type MerchantSession,
+  type WalletActivityAll,
 } from "@/lib/payphone/api";
 import type { EngineHealth, FeeSchedule, LocalInvoice } from "@/lib/payphone/types";
 import { MonoValue, StatCard } from "./bits";
@@ -146,6 +147,7 @@ export function Dashboard({ onOpenCheckout }: { onOpenCheckout: (id: string, tok
         <TabsList className="mb-6 flex h-auto w-full flex-wrap justify-start gap-1 bg-muted/50 p-1">
           <TabsTrigger value="overview" className="gap-1.5"><TrendingUp className="h-3.5 w-3.5" /> Overview</TabsTrigger>
           <TabsTrigger value="invoices" className="gap-1.5"><CreditCard className="h-3.5 w-3.5" /> Invoices</TabsTrigger>
+          <TabsTrigger value="activity" className="gap-1.5"><ActivityIcon className="h-3.5 w-3.5" /> Activity</TabsTrigger>
           <TabsTrigger value="identity" className="gap-1.5"><Fingerprint className="h-3.5 w-3.5" /> Phone identity</TabsTrigger>
           <TabsTrigger value="webhooks" className="gap-1.5"><Webhook className="h-3.5 w-3.5" /> Webhooks</TabsTrigger>
           <TabsTrigger value="keys" className="gap-1.5"><KeyRound className="h-3.5 w-3.5" /> API keys</TabsTrigger>
@@ -154,6 +156,7 @@ export function Dashboard({ onOpenCheckout }: { onOpenCheckout: (id: string, tok
 
         <TabsContent value="overview"><Overview merchant={merchant} onOpenInvoices={() => setTab("invoices")} /></TabsContent>
         <TabsContent value="invoices"><Invoices merchant={merchant} onOpenCheckout={onOpenCheckout} /></TabsContent>
+        <TabsContent value="activity"><Activity merchant={merchant} /></TabsContent>
         <TabsContent value="identity"><Identity merchant={merchant} /></TabsContent>
         <TabsContent value="webhooks"><Webhooks merchant={merchant} /></TabsContent>
         <TabsContent value="keys"><Keys merchant={merchant} /></TabsContent>
@@ -382,6 +385,267 @@ function Overview({ merchant, onOpenInvoices }: { merchant: MerchantSession; onO
 }
 
 // ---------------------------------------------------------------- invoices ----
+
+/**
+ * Wallet Activity — the full-visibility radar ("where is my money?").
+ *
+ * One scan fans out across EVERY configured EVM network and reports every
+ * ERC-20 transfer touching the address — incoming AND outgoing, ANY token —
+ * each labeled with the network it ACTUALLY landed on (the network the
+ * sender used, not the one any UI picked), live confirmations and a
+ * block-explorer link. Complements the wallet's per-network Incoming card.
+ */
+const WINDOW_PRESETS = [
+  { value: "2000", label: "Recent · ~1–2 h" },
+  { value: "9000", label: "Today · ~5–12 h" },
+  { value: "20000", label: "Deep · 1–3 days" },
+] as const;
+
+function fmtQty(q: string): string {
+  const n = Number(q);
+  if (!Number.isFinite(n)) return q;
+  return n.toLocaleString("en-US", { maximumFractionDigits: Math.min(8, Math.max(2, (q.split(".")[1]?.length ?? 2) - 2)) });
+}
+
+function agoLabel(confirmations: number, blockTimeSecs: number | undefined): string {
+  const secs = confirmations * (blockTimeSecs ?? 2);
+  if (secs < 45) return "just now";
+  if (secs < 3600) return `≈ ${Math.round(secs / 60)} min ago`;
+  return `≈ ${Math.round(secs / 3600)} h ago`;
+}
+
+function Activity({ merchant }: { merchant: MerchantSession }) {
+  const [address, setAddress] = useState(merchant.wallet);
+  const [windowBlocks, setWindowBlocks] = useState<string>("2000");
+  const [direction, setDirection] = useState<"both" | "in" | "out">("both");
+  const [data, setData] = useState<WalletActivityAll | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [auto, setAuto] = useState(true);
+
+  const scan = useCallback(
+    async (opts?: { silent?: boolean }) => {
+      const addr = address.trim();
+      if (!/^0x[0-9a-fA-F]{40}$/.test(addr)) {
+        setError("Enter an EVM address (0x + 40 hex characters).");
+        return;
+      }
+      if (!opts?.silent) setBusy(true);
+      try {
+        const d = await api.walletActivityAll(addr, {
+          blocks: Number(windowBlocks),
+          direction,
+        });
+        setData(d);
+        setError(null);
+      } catch (e) {
+        const msg = e instanceof ApiError ? e.message : "scan failed — engine offline?";
+        if (!opts?.silent) setError(msg);
+      } finally {
+        if (!opts?.silent) setBusy(false);
+      }
+    },
+    [address, windowBlocks, direction]
+  );
+
+  // First scan when the tab mounts / parameters change; auto-poll while on.
+  useEffect(() => {
+    void scan();
+  }, [scan]);
+  useEffect(() => {
+    if (!auto) return;
+    const t = window.setInterval(() => void scan({ silent: true }), 15000);
+    return () => window.clearInterval(t);
+  }, [auto, scan]);
+
+  const transfers = data?.transfers ?? [];
+  const incoming = transfers.filter((t) => t.direction === "in");
+  const outgoing = transfers.filter((t) => t.direction === "out");
+  const pending = transfers.filter((t) => !t.confirmed);
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-start gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/5 px-3 py-2.5 text-sm">
+        <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-emerald-500" />
+        <p className="text-muted-foreground">
+          <strong className="text-foreground">Every transfer is on-chain — nothing can go missing.</strong>{" "}
+          If a block explorer can see it, it shows here: on the network the sender{" "}
+          <em>actually used</em>, with live confirmations and a link you can verify yourself.
+          Picked Optimism but the exchange sent on World Chain? The money still lands — this
+          panel shows exactly where.
+        </p>
+      </div>
+
+      <Card>
+        <CardHeader className="pb-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <CardTitle className="flex items-center gap-2 text-base">
+              <ActivityIcon className="h-4 w-4 text-primary" /> Wallet activity — all networks
+            </CardTitle>
+            <div className="flex items-center gap-2">
+              <Button size="sm" variant={auto ? "secondary" : "outline"} onClick={() => setAuto(!auto)} className="h-8 text-xs">
+                <RefreshCw className={`mr-1 h-3 w-3 ${auto && busy ? "animate-spin" : ""}`} />
+                auto {auto ? "15s" : "off"}
+              </Button>
+              <Button size="sm" onClick={() => void scan()} disabled={busy} className="h-8 text-xs">
+                Scan now
+              </Button>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid gap-3 sm:grid-cols-[1fr_auto_auto]">
+            <div className="space-y-1">
+              <Label htmlFor="activity-address">Watched address</Label>
+              <Input
+                id="activity-address"
+                placeholder="0x… your PayPhone receiving wallet"
+                value={address}
+                onChange={(e) => setAddress(e.target.value)}
+                className="font-mono text-xs"
+              />
+            </div>
+            <div className="space-y-1">
+              <Label>History</Label>
+              <Select value={windowBlocks} onValueChange={setWindowBlocks}>
+                <SelectTrigger className="h-9 w-[150px] text-xs"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {WINDOW_PRESETS.map((p) => (
+                    <SelectItem key={p.value} value={p.value}>{p.label}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1">
+              <Label>Direction</Label>
+              <Select value={direction} onValueChange={(v) => setDirection(v as "both" | "in" | "out")}>
+                <SelectTrigger className="h-9 w-[110px] text-xs"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="both">In + out</SelectItem>
+                  <SelectItem value="in">Incoming</SelectItem>
+                  <SelectItem value="out">Outgoing</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+
+          {error && (
+            <p className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-destructive">{error}</p>
+          )}
+
+          {/* scanned networks + native balances strip */}
+          {data && (
+            <div className="flex flex-wrap items-center gap-1.5 text-xs">
+              <span className="text-muted-foreground">scanned:</span>
+              {data.scanned_networks.map((n) => (
+                <Badge key={n} variant="secondary" className="text-[10px]">{n}</Badge>
+              ))}
+              {data.skipped_networks.map((s) => (
+                <Badge key={s.network} variant="outline" className="text-[10px] text-amber-600" title={s.note}>
+                  {s.network} ⚠
+                </Badge>
+              ))}
+              {data.native_balances.map((nb) => (
+                <span key={nb.network} className="ml-1 rounded border bg-background/60 px-1.5 py-0.5 font-mono text-[10px]">
+                  {fmtQty(nb.qty)} {nb.asset} <span className="text-muted-foreground">on {nb.network}</span>
+                </span>
+              ))}
+              <span className="ml-auto text-[10px] text-muted-foreground">
+                {data.transfer_count} transfer{data.transfer_count === 1 ? "" : "s"} · window {data.window_blocks} blocks{data.cache === "hit" ? " · cached" : ""}
+              </span>
+            </div>
+          )}
+
+          {transfers.length === 0 ? (
+            <div className="rounded-lg border border-dashed px-4 py-8 text-center text-sm">
+              {busy ? (
+                <span className="text-muted-foreground">Scanning every supported network…</span>
+              ) : (
+                <div className="space-y-1.5">
+                  <p className="font-medium">No transfers found in this window.</p>
+                  <p className="mx-auto max-w-md text-xs text-muted-foreground">
+                    Nothing touching this address on any supported network in the scanned
+                    blocks. If you just sent funds: exchanges batch withdrawals, so a
+                    transfer can take a few minutes to appear. Pick a deeper history
+                    window, or check the sender&apos;s withdrawal status — once it lands on-chain,
+                    it appears here automatically.
+                  </p>
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {transfers.map((t) => {
+                const isIn = t.direction === "in";
+                return (
+                  <div
+                    key={`${t.tx_hash}-${t.log_index}-${t.direction}`}
+                    className={`flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-lg border px-3 py-2.5 text-sm ${
+                      isIn ? "border-emerald-500/25 bg-emerald-500/[0.04]" : "border-amber-500/25 bg-amber-500/[0.04]"
+                    }`}
+                  >
+                    <span className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full ${
+                      isIn ? "bg-emerald-500/15 text-emerald-600" : "bg-amber-500/15 text-amber-600"
+                    }`}>
+                      {isIn ? <ArrowDownLeft className="h-4 w-4" /> : <ArrowUpRight className="h-4 w-4" />}
+                    </span>
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-baseline gap-x-2">
+                        <span className={`font-semibold ${isIn ? "text-emerald-600" : "text-amber-600"}`}>
+                          {isIn ? "+" : "−"}{fmtQty(t.qty)} {t.asset ?? shortHash(t.asset_address, 6)}
+                        </span>
+                        <Badge variant="outline" className="text-[10px] uppercase tracking-wide">
+                          {t.network}
+                        </Badge>
+                      </div>
+                      <div className="mt-0.5 flex flex-wrap items-center gap-x-2 text-[11px] text-muted-foreground">
+                        <span>{isIn ? "from" : "to"} <span className="font-mono">{shortHash(t.counterparty, 8)}</span></span>
+                        <span>·</span>
+                        <a
+                          href={t.explorer_url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-0.5 font-mono text-primary hover:underline"
+                        >
+                          {shortHash(t.tx_hash, 8)} <ExternalLink className="h-3 w-3" />
+                        </a>
+                        <span>·</span>
+                        <span>{agoLabel(t.confirmations, data?.block_time_secs?.[t.network])}</span>
+                      </div>
+                    </div>
+                    <div className="ml-auto text-right">
+                      {t.confirmed ? (
+                        <Badge variant="default" className="bg-emerald-600 text-[10px] text-white">confirmed</Badge>
+                      ) : (
+                        <Badge variant="outline" className="text-[10px] text-amber-600" title="Network confirmations still accumulating before finality">
+                          detected · {t.confirmations}/{t.required_confirmations} confs
+                        </Badge>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {data && data.notes.length > 0 && (
+            <p className="text-[11px] leading-relaxed text-muted-foreground">
+              scan notes: {data.notes.join(" · ")}
+            </p>
+          )}
+
+          {data && (
+            <p className="text-[11px] text-muted-foreground">
+              {incoming.length} incoming · {outgoing.length} outgoing · {pending.length} pending confirmations.
+              Native-coin (non-token) history is shown as live balances; token transfers are fully listed.
+              All reads are watch-only — PayPhone never custodies funds.
+            </p>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
 
 function Invoices({
   merchant, onOpenCheckout,
@@ -823,7 +1087,7 @@ function Webhooks({ merchant }: { merchant: MerchantSession }) {
         <CardContent className="space-y-3">
           <Input placeholder="https://api.yourapp.com/payphone/webhook" value={url} onChange={(e) => setUrl(e.target.value)} />
           <Button className="w-full gap-2" onClick={sendTest} disabled={busy}>
-            {busy ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Activity className="h-4 w-4" />} Send signed test event
+            {busy ? <RefreshCw className="h-4 w-4 animate-spin" /> : <ActivityIcon className="h-4 w-4" />} Send signed test event
           </Button>
           <p className="text-xs text-muted-foreground">
             Every delivery carries <span className="font-mono">X-PayPhone-Signature</span>{" "}

@@ -156,6 +156,42 @@ except Exception as e:
     check("wallet activity feed live (incoming rows + native balance + conf policy)",
           False, repr(e))
 
+print("\n[9] full-visibility activity scan (all networks, both directions)")
+DEAD = "0x000000000000000000000000000000000000dEaD"
+try:
+    code, raw = get(f"/api/v1/wallet/{DEAD}/activity?blocks=200", timeout=120)
+    d = json.loads(raw).get("data", {})
+    nets = d.get("scanned_networks", [])
+    check("multi-network scan live (all 8 EVM networks in one call)",
+          code == 200 and len(nets) >= 8 and "worldchain" in nets,
+          f"code={code} scanned={nets}")
+    check("scan payload well-formed (transfers + native + notes)",
+          all(k in d for k in ("transfers", "native_balances", "transfer_count",
+                               "window_blocks", "skipped_networks", "notes")),
+          "missing keys" if d else "")
+    check("native balances reported per network",
+          isinstance(d.get("native_balances"), list) and len(d.get("native_balances", [])) >= 5,
+          str(d.get("native_balances", []))[:160])
+except Exception as e:
+    check("multi-network scan live", False, repr(e))
+try:
+    code, raw = get(f"/api/v1/wallet/{DEAD}/activity?blocks=200&direction=in&networks=optimism",
+                    timeout=60)
+    d = json.loads(raw).get("data", {})
+    check("direction + network filters honored",
+          code == 200 and d.get("scanned_networks") == ["optimism"]
+          and all(t.get("direction") == "in" for t in d.get("transfers", [])),
+          json.dumps(d)[:160])
+except Exception as e:
+    check("direction + network filters honored", False, repr(e))
+try:
+    get("/api/v1/wallet/not-an-evm-address/activity", timeout=30)
+    check("bad address rejected", False, "200 returned for invalid address")
+except Exception as e:
+    import urllib.error as _ue
+    check("bad address rejected", isinstance(e, _ue.HTTPError) and e.code == 400,
+          repr(e)[:120])
+
 print()
 print(f"RESULT: {len(passed)} passed, {len(failed)} failed")
 if failed:

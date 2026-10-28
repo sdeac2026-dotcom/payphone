@@ -75,6 +75,29 @@ Delivery headers: `X-PayPhone-Event`, `X-PayPhone-Timestamp`,
 `X-PayPhone-Signature: hex(HMAC(secret, "{ts}.{raw_body}"))`. Events:
 `invoice.paid`, `invoice.underpaid`, `invoice.expired`. Retries: 3 (1s/3s).
 
+### Wallet activity (transfer visibility — "where is my money?")
+| | |
+|---|---|
+| `GET /v1/wallet/activity?network=&address=&blocks=` | Public **money radar** (per-network): every settleable-token `Transfer` **to** `address` on `network` in the trailing window — real tx hashes, sender, confirmations vs finality depth, explorer links — plus the live native balance. |
+| `GET /v1/wallet/:address/activity?blocks=&direction=&networks=` | Public **full-visibility scan** (superset): one call fans out across **every configured EVM network**, both directions, ANY token (topic-only `eth_getLogs` — adaptive chunk sizes ride the RPC mesh). Each row carries the network the transfer **actually landed on**. |
+
+Query parameters (multi-network route): `blocks` (lookback, default 2000,
+clamped 200–20000), `direction` (`in`/`out`/`both`, default `both`),
+`networks` (comma-separated filter, default all). Response `data`:
+`{ address, window_blocks, scanned_networks, skipped_networks[], transfers[]
+({network, chain_id, direction, asset, asset_address, decimals, qty,
+counterparty, tx_hash, block, confirmations, required_confirmations,
+confirmed, status, explorer_url}), transfer_count, native_balances[],
+block_time_secs{}, notes[], scanned_at, cache }`.
+
+Why it exists: a direct transfer to a PayPhone address is not an invoice —
+but it is still the user's money. A deposit that any block explorer can see
+is never invisible here, whichever network the sender actually used: pick
+Optimism in the UI and the exchange sends on World Chain? The scan reports
+the WLD transfer under `worldchain` with a Worldscan link. Per-network
+gateway hiccups degrade to honest `notes` — never to silently hidden
+transfers. Overlapping polls share a 5 s server-side cache.
+
 ### SimNet (development chain — disabled with `PAYPHONE_SIMNET=0`)
 | | |
 |---|---|

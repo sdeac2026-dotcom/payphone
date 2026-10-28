@@ -42,6 +42,74 @@ const LOG_CHUNK: u64 = 2_000;
 /// on the fastest chain here; invoices expire long before this).
 const LOG_WINDOW_CAP: u64 = 100_000;
 
+// ---- address-activity scanner tuning (see [`EvmAdapter::address_activity`]) ----
+//
+// The full-visibility superset of the wallet's incoming radar: BOTH
+// directions, ANY token (topic-only filter — catches assets outside the
+// registry), every configured network in one call, with per-network notes
+// instead of silent skips. Rides the same RPC mesh as everything else.
+
+/// Starting `eth_getLogs` chunk (blocks) for activity scans. The scanner
+/// adapts DOWN per network when a gateway rejects the range — World Chain's
+/// public Alchemy gateway caps getLogs at 100 blocks, which silently hid
+/// every WLD deposit until this became adaptive.
+const ACTIVITY_CHUNK_START: u64 = 1_000;
+/// Floor for the adaptive chunk — never go below 100 blocks per call.
+const ACTIVITY_CHUNK_MIN: u64 = 100;
+/// Hard cap on getLogs calls per network per scan — bounds worst-case
+/// latency when a gateway forces tiny chunks.
+const ACTIVITY_MAX_CALLS: u64 = 48;
+/// Most-recent transfers returned per response (protects payloads).
+const ACTIVITY_TRANSFER_CAP: usize = 500;
+/// Default / maximum lookback window (blocks) for an activity scan.
+pub const DEFAULT_ACTIVITY_WINDOW: u64 = 2_000;
+pub const MAX_ACTIVITY_WINDOW: u64 = 20_000;
+/// Response cache TTL for activity scans (dashboard polls every ~15 s;
+/// overlapping polls within 5 s share one chain read).
+const ACTIVITY_CACHE_TTL: Duration = Duration::from_secs(5);
+
+/// Which transfers an activity scan returns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivityDirection {
+    /// Transfers **to** the watched address (money arriving).
+    Incoming,
+    /// Transfers **from** the watched address (money leaving).
+    Outgoing,
+    /// Both directions (default — nothing a user does on-chain is hidden).
+    Both,
+}
+
+impl ActivityDirection {
+    pub fn parse(s: &str) -> Option<ActivityDirection> {
+        match s.to_ascii_lowercase().as_str() {
+            "in" | "incoming" => Some(ActivityDirection::Incoming),
+            "out" | "outgoing" => Some(ActivityDirection::Outgoing),
+            "both" | "" => Some(ActivityDirection::Both),
+            _ => None,
+        }
+    }
+
+    fn want_in(self) -> bool {
+        matches!(self, ActivityDirection::Incoming | ActivityDirection::Both)
+    }
+
+    fn want_out(self) -> bool {
+        matches!(self, ActivityDirection::Outgoing | ActivityDirection::Both)
+    }
+}
+
+/// Rough per-network block times (seconds) — used only to render friendly
+/// "≈ N minutes ago" labels in the console. Not consensus data.
+pub fn block_time_hint(network: &str) -> f64 {
+    match network {
+        "ethereum" => 12.0,
+        "arbitrum" => 0.25,
+        "bsc" => 3.0,
+        "polygon" => 2.1,
+        _ => 2.0, // OP-stack chains (base, optimism, worldchain) + avalanche ≈ 2 s
+    }
+}
+
 /// Watch adapter for one or more EVM networks. Cheaply cloneable (`Arc`
 /// over the gateway pools + read cache; the reqwest client is `Arc`).
 #[derive(Clone)]
@@ -51,6 +119,15 @@ pub struct EvmAdapter {
     /// idempotent-read cache (see [`cache_ttl`])
     cache: std::sync::Arc<std::sync::Mutex<HashMap<String, CacheEntry>>>,
     http: reqwest::Client,
+    /// `(network, token)` → `(symbol, decimals)` resolved on-chain, cached
+    /// for the process lifetime (registry hits never reach the RPC).
+    token_meta: std::sync::Arc<std::sync::Mutex<HashMap<(String, String), (String, u8)>>>,
+    /// Per-network adaptive getLogs chunk size (shrinks on range rejections).
+    log_chunks: std::sync::Arc<std::sync::Mutex<HashMap<String, u64>>>,
+    /// Short-TTL cache of activity scans keyed by scan parameters —
+    /// overlapping dashboard polls share one chain read.
+    activity_cache:
+        std::sync::Arc<std::sync::Mutex<HashMap<String, (Instant, serde_json::Value)>>>,
 }
 
 /// One RPC gateway plus its health state.
@@ -235,6 +312,9 @@ impl EvmAdapter {
             pools: std::sync::Arc::new(std::sync::Mutex::new(pools)),
             cache: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
             http,
+            token_meta: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+            log_chunks: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+            activity_cache: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
         })
     }
 
@@ -622,6 +702,433 @@ impl EvmAdapter {
         rows.truncate(50);
         Ok(rows)
     }
+
+    // ================= address activity (full transfer visibility) =================
+    //
+    // The superset of [`Self::incoming_transfers`]: BOTH directions, ANY
+    // token (topic-only filter — catches assets outside the registry), every
+    // configured network in ONE call. A transfer that a block explorer can
+    // see is never invisible here, whether or not it went through an invoice
+    // and whichever network the sender actually used.
+
+    /// Adaptive chunked `eth_getLogs`. Starts at [`ACTIVITY_CHUNK_START`]
+    /// blocks per call and halves on gateway rejections (range caps, size
+    /// caps) down to [`ACTIVITY_CHUNK_MIN`]. Returns `(logs, notes)` where
+    /// notes describe any partial coverage honestly — a gateway being
+    /// restrictive must never silently hide transfers.
+    async fn get_logs_adaptive(
+        &self,
+        network: &str,
+        mut filter: serde_json::Value,
+        from_block: u64,
+        to_block: u64,
+    ) -> (Vec<serde_json::Value>, Vec<String>) {
+        let mut chunk = self
+            .log_chunks
+            .lock()
+            .expect("log chunk lock")
+            .get(network)
+            .copied()
+            .unwrap_or(ACTIVITY_CHUNK_START);
+        let mut notes: Vec<String> = Vec::new();
+        let mut out: Vec<serde_json::Value> = Vec::new();
+        let mut start = from_block;
+        let mut calls = 0u64;
+        let mut adapted = false;
+        while start <= to_block {
+            if calls >= ACTIVITY_MAX_CALLS {
+                notes.push(format!(
+                    "{network}: scan truncated after {calls} calls — narrow the window for older history"
+                ));
+                break;
+            }
+            let end = (start + chunk - 1).min(to_block);
+            filter["fromBlock"] = json!(format!("0x{start:x}"));
+            filter["toBlock"] = json!(format!("0x{end:x}"));
+            calls += 1;
+            match self.rpc(network, "eth_getLogs", json!([filter.clone()])).await {
+                Ok(logs) => {
+                    if let Some(arr) = logs.as_array() {
+                        out.extend(arr.iter().cloned());
+                    }
+                    start = end + 1;
+                }
+                Err(e) => {
+                    if chunk > ACTIVITY_CHUNK_MIN {
+                        adapted = true;
+                        chunk = (chunk / 2).max(ACTIVITY_CHUNK_MIN);
+                        self.log_chunks
+                            .lock()
+                            .expect("log chunk lock")
+                            .insert(network.to_string(), chunk);
+                        continue; // retry the same range, smaller chunk
+                    }
+                    notes.push(format!("{network}: skipped blocks {start}–{end} ({e})"));
+                    start = end + 1;
+                }
+            }
+        }
+        if adapted {
+            notes.push(format!(
+                "{network}: gateway caps getLogs ranges — chunk auto-adapted"
+            ));
+        }
+        (out, notes)
+    }
+
+    /// Resolve `(symbol, decimals)` for a token: registry first (free), then
+    /// an on-chain `symbol()`/`decimals()` probe (cached for process life).
+    /// Unresolvable tokens return `("", 18)` — the transfer still displays.
+    async fn token_symbol_decimals(&self, network: &str, token: &str) -> (String, u8) {
+        let key = (network.to_string(), token.to_lowercase());
+        if let Some(t) = registry::token_by_address(network, token) {
+            return (t.symbol.to_string(), t.decimals);
+        }
+        if let Some(hit) = self.token_meta.lock().expect("token meta lock").get(&key) {
+            return hit.clone();
+        }
+        let meta = async {
+            let sym_raw = self
+                .rpc(network, "eth_call", json!([{ "to": token, "data": "0x95d89b41" }, "latest"]))
+                .await
+                .ok()
+                .and_then(|r| r.as_str().and_then(decode_symbol_hex));
+            let dec = self
+                .rpc(network, "eth_call", json!([{ "to": token, "data": "0x313ce567" }, "latest"]))
+                .await
+                .ok()
+                .and_then(|r| r.as_str().map(str::to_string))
+                .and_then(|h| parse_hex_quantity(&h))
+                .map(|d| u8::try_from(d).unwrap_or(18))
+                .unwrap_or(18);
+            (sym_raw.unwrap_or_default(), dec)
+        }
+        .await;
+        self.token_meta
+            .lock()
+            .expect("token meta lock")
+            .insert(key, meta.clone());
+        meta
+    }
+
+    /// Normalize a watched address: trim, require `0x` + 40 hex chars.
+    /// Returns `(lowercase address, padded 32-byte topic)`.
+    fn normalize_address(address: &str) -> ApiResult<(String, String)> {
+        let a = address.trim().to_lowercase();
+        let hexpart = a.strip_prefix("0x").unwrap_or(&a);
+        if hexpart.len() != 40 || !hexpart.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(AppError::bad_request(format!(
+                "'{address}' is not an EVM address (expected 0x + 40 hex characters)"
+            )));
+        }
+        let padded = format!("0x{:0>64}", hexpart);
+        Ok((a, padded))
+    }
+
+    /// Scan one network for transfers touching `address`. Never fails —
+    /// a dead gateway degrades into an honest per-network note instead of
+    /// hiding the rest of the picture.
+    async fn scan_network_activity(
+        &self,
+        network: &str,
+        address: &str,
+        address_topic: &str,
+        window: u64,
+        direction: ActivityDirection,
+    ) -> serde_json::Value {
+        let mut notes: Vec<String> = Vec::new();
+        let mut transfers: Vec<serde_json::Value> = Vec::new();
+        let mut native = serde_json::Value::Null;
+        let (from_block, tip) = match self.block_number(network).await {
+            Ok(tip) => (tip.saturating_sub(window), tip),
+            Err(e) => {
+                return json!({
+                    "network": network,
+                    "status": "unavailable",
+                    "note": format!("{e}"),
+                    "transfers": [],
+                    "native_balance": serde_json::Value::Null,
+                })
+            }
+        };
+
+        // ---- ERC-20 transfers touching the address -------------------------
+        let mut raw_logs: Vec<(serde_json::Value, &str)> = Vec::new();
+        if direction.want_in() {
+            let (logs, mut n) = self
+                .get_logs_adaptive(
+                    network,
+                    json!({ "topics": [TRANSFER_TOPIC, serde_json::Value::Null, address_topic] }),
+                    from_block,
+                    tip,
+                )
+                .await;
+            notes.append(&mut n);
+            for l in logs {
+                raw_logs.push((l, "in"));
+            }
+        }
+        if direction.want_out() {
+            let from_topic = address_topic.to_string();
+            let (logs, mut n) = self
+                .get_logs_adaptive(
+                    network,
+                    json!({ "topics": [TRANSFER_TOPIC, from_topic, serde_json::Value::Null] }),
+                    from_block,
+                    tip,
+                )
+                .await;
+            notes.append(&mut n);
+            for l in logs {
+                raw_logs.push((l, "out"));
+            }
+        }
+
+        let required = registry::find(network).map(|n| n.confirmations).unwrap_or(12);
+        let explorer = registry::find(network).map(|n| n.explorer_tx).unwrap_or("");
+        let native_asset = registry::find(network).map(|n| n.native).unwrap_or("ETH");
+        let chain_id = registry::find(network).map(|n| n.chain_id);
+        let mut seen = std::collections::HashSet::new();
+        for (log, dir) in &raw_logs {
+            let (qty, block, tx_hash) = match decode_transfer(log) {
+                Some(v) => v,
+                None => continue,
+            };
+            // Defensive re-check of the padded topic (same policy as invoices).
+            let topic = log["topics"]
+                .get(if *dir == "in" { 2 } else { 1 })
+                .and_then(|t| t.as_str())
+                .unwrap_or("");
+            if !topic_matches(topic, address) {
+                continue;
+            }
+            if qty == 0 {
+                continue; // zero-value noise
+            }
+            let log_index = log["logIndex"]
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_default();
+            if !seen.insert((tx_hash.clone(), log_index.clone(), dir.to_string())) {
+                continue;
+            }
+            let token = log["address"].as_str().unwrap_or("").to_string();
+            let (symbol, decimals) = if token.is_empty() {
+                (String::new(), 18u8)
+            } else {
+                self.token_symbol_decimals(network, &token).await
+            };
+            let confirmations = tip.saturating_sub(block);
+            let counterparty = log["topics"]
+                .get(if *dir == "in" { 1 } else { 2 })
+                .and_then(|t| t.as_str())
+                .and_then(topic_to_address)
+                .unwrap_or_default();
+            transfers.push(json!({
+                "network": network,
+                "chain_id": chain_id,
+                "direction": dir,
+                "asset": if symbol.is_empty() { serde_json::Value::Null } else { json!(symbol) },
+                "asset_address": token,
+                "decimals": decimals,
+                "qty": base_units_to_decimal(qty, decimals),
+                "qty_base": qty.to_string(),
+                "counterparty": counterparty,
+                "tx_hash": tx_hash,
+                "block": block,
+                "log_index": log_index,
+                "confirmations": confirmations,
+                "required_confirmations": required,
+                "confirmed": confirmations >= required,
+                "status": if confirmations >= required { "confirmed" } else { "detected" },
+                "explorer_url": format!("{explorer}{tx_hash}"),
+            }));
+        }
+
+        // ---- native balance (context strip; native history needs an indexer) --
+        if let Ok(wei) = self.balance(network, address, None).await {
+            native = json!({
+                "network": network,
+                "asset": native_asset,
+                "qty": base_units_to_decimal(wei, 18),
+            });
+        }
+
+        json!({
+            "network": network,
+            "status": "ok",
+            "scanned_from_block": from_block,
+            "scanned_to_block": tip,
+            "transfers": transfers,
+            "native_balance": native,
+            "notes": notes,
+        })
+    }
+
+    /// Full multi-network activity scan for `address`. Public adapter API:
+    /// every transfer touching the address on every configured EVM network,
+    /// in and out, with real amounts, live confirmations and explorer links.
+    pub async fn address_activity(
+        &self,
+        address: &str,
+        window: u64,
+        direction: ActivityDirection,
+        networks: Option<&[String]>,
+    ) -> ApiResult<serde_json::Value> {
+        let (addr, addr_topic) = Self::normalize_address(address)?;
+        let window = window.clamp(200, MAX_ACTIVITY_WINDOW);
+
+        // Scan requested ∩ configured, skipping the legacy "mainnet" alias
+        // (a duplicate of ethereum) so transfers are never double-reported —
+        // unless it was explicitly requested.
+        let wanted: Vec<String> = match networks {
+            Some(list) if !list.is_empty() => list
+                .iter()
+                .map(|n| n.trim().to_lowercase())
+                .filter(|n| !n.is_empty())
+                .collect(),
+            _ => self.pools.lock().expect("rpc pool lock").keys().cloned().collect(),
+        };
+        let explicit = networks.is_some();
+        let mut selected: Vec<String> = Vec::new();
+        for n in wanted {
+            if n == "mainnet" && !explicit {
+                continue;
+            }
+            if self.pools.lock().expect("rpc pool lock").contains_key(&n) && !selected.contains(&n) {
+                selected.push(n);
+            }
+        }
+        if selected.is_empty() {
+            return Err(AppError::bad_request(
+                "no matching EVM network is configured for this scan",
+            ));
+        }
+
+        // Short-TTL cache: identical overlapping scans share one chain read.
+        let cache_key = format!("{}|{window}|{direction:?}|{}", addr, selected.join(","));
+        if let Some((at, payload)) = self.activity_cache.lock().expect("activity cache lock").get(&cache_key) {
+            if at.elapsed() < ACTIVITY_CACHE_TTL {
+                let mut v = payload.clone();
+                v["cache"] = json!("hit");
+                return Ok(v);
+            }
+        }
+
+        // Scan networks concurrently; a slow gateway cannot stall the rest.
+        let mut handles = Vec::new();
+        for net in &selected {
+            let adapter = self.clone();
+            let net = net.clone();
+            let addr = addr.clone();
+            let topic = addr_topic.clone();
+            handles.push(tokio::spawn(async move {
+                adapter.scan_network_activity(&net, &addr, &topic, window, direction).await
+            }));
+        }
+        let mut per_network = Vec::new();
+        for h in handles {
+            if let Ok(v) = h.await {
+                per_network.push(v);
+            }
+        }
+
+        let mut all_transfers: Vec<serde_json::Value> = Vec::new();
+        let mut native_balances: Vec<serde_json::Value> = Vec::new();
+        let mut scanned: Vec<String> = Vec::new();
+        let mut skipped: Vec<serde_json::Value> = Vec::new();
+        let mut notes: Vec<String> = Vec::new();
+        for pn in &per_network {
+            let name = pn["network"].as_str().unwrap_or("").to_string();
+            if pn["status"].as_str() == Some("ok") {
+                scanned.push(name);
+            } else {
+                skipped.push(json!({ "network": name, "note": pn["note"].clone() }));
+            }
+            if let Some(arr) = pn["transfers"].as_array() {
+                all_transfers.extend(arr.iter().cloned());
+            }
+            if pn["native_balance"].is_object() {
+                native_balances.push(pn["native_balance"].clone());
+            }
+            if let Some(ns) = pn["notes"].as_array() {
+                notes.extend(ns.iter().filter_map(|n| n.as_str().map(str::to_string)));
+            }
+        }
+        // Newest first — the user cares about what just happened.
+        all_transfers.sort_by(|a, b| {
+            let ab = a["block"].as_u64().unwrap_or(0);
+            let bb = b["block"].as_u64().unwrap_or(0);
+            bb.cmp(&ab).then_with(|| {
+                a["network"].as_str().unwrap_or("").cmp(b["network"].as_str().unwrap_or(""))
+            })
+        });
+        all_transfers.truncate(ACTIVITY_TRANSFER_CAP);
+
+        let block_times: serde_json::Map<String, serde_json::Value> = scanned
+            .iter()
+            .map(|n| (n.clone(), json!(block_time_hint(n))))
+            .collect();
+
+        let payload = json!({
+            "address": addr,
+            "window_blocks": window,
+            "scanned_networks": scanned,
+            "skipped_networks": skipped,
+            "transfers": all_transfers,
+            "transfer_count": all_transfers.len(),
+            "native_balances": native_balances,
+            "block_time_secs": block_times,
+            "notes": notes,
+            "scanned_at": now_unix(),
+            "cache": "miss",
+        });
+        {
+            let mut cache = self.activity_cache.lock().expect("activity cache lock");
+            if cache.len() > 256 {
+                cache.retain(|_, (at, _)| at.elapsed() < ACTIVITY_CACHE_TTL);
+            }
+            cache.insert(cache_key, (Instant::now(), payload.clone()));
+        }
+        Ok(payload)
+    }
+}
+
+/// Unix seconds (activity timestamps).
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Decode an ERC-20 `symbol()` return value. Handles both ABI encodings seen
+/// in the wild: dynamic `string` and legacy fixed `bytes32`.
+fn decode_symbol_hex(hexdata: &str) -> Option<String> {
+    let body = hexdata.strip_prefix("0x")?;
+    let bytes = hex::decode(body).ok()?;
+    if bytes.len() == 32 {
+        // bytes32: symbol padded with zeros / right-padded data
+        let s: String = bytes
+            .iter()
+            .filter(|&&b| b != 0 && b.is_ascii_graphic())
+            .map(|&b| b as char)
+            .collect();
+        return Some(s.trim().to_string());
+    }
+    // dynamic string: [offset(32)][len(32)][data…]
+    if bytes.len() >= 64 {
+        let len = usize::try_from(u128::from_be_bytes(bytes[48..64].try_into().ok()?)).ok()?;
+        let avail = bytes.len() - 64;
+        let data = bytes.get(64..64 + len.min(avail))?;
+        return Some(
+            String::from_utf8_lossy(data)
+                .trim()
+                .trim_end_matches('\u{0}')
+                .to_string(),
+        );
+    }
+    None
 }
 
 /// Decode one ERC-20 `Transfer` log → (value in base units, block, tx hash).
@@ -802,6 +1309,55 @@ mod tests {
     fn registry_drives_confirmations() {
         let inv = sample(); // network = base
         assert_eq!(registry::find(&inv.network).unwrap().confirmations, 8);
+    }
+
+    #[test]
+    fn symbol_decode_both_abi_shapes() {
+        // Dynamic string: USDC-style (offset 0x20, len 4, "USDC")
+        let mut dyn_str = String::from("0x");
+        dyn_str.push_str(&format!("{:0>64}", "20")); // offset (this decoder reads data at byte 64)
+        dyn_str.push_str(&format!("{:0>64}", "4")); // length = 4
+        for b in b"USDC" {
+            dyn_str.push_str(&format!("{b:02x}"));
+        }
+        dyn_str.push_str(&"0".repeat(56)); // padding to 96 bytes
+        assert_eq!(decode_symbol_hex(&dyn_str).as_deref(), Some("USDC"));
+
+        // bytes32 shape (right-padded zeros) — WLD on worldchain returns a
+        // 32-byte word with leading space padding; graphics-only filter.
+        let mut word = b"WLD".iter().map(|&b| format!("{b:02x}")).collect::<String>();
+        word.push_str(&"0".repeat(58));
+        assert_eq!(decode_symbol_hex(&format!("0x{word}")).as_deref(), Some("WLD"));
+
+        // Junk is None; empty results decode to empty string (transfer still displays).
+        assert!(decode_symbol_hex("0x").is_none());
+        assert!(decode_symbol_hex("zzz").is_none());
+    }
+
+    #[test]
+    fn activity_direction_parse() {
+        assert_eq!(ActivityDirection::parse("in"), Some(ActivityDirection::Incoming));
+        assert_eq!(ActivityDirection::parse("OUT"), Some(ActivityDirection::Outgoing));
+        assert_eq!(ActivityDirection::parse(""), Some(ActivityDirection::Both));
+        assert_eq!(ActivityDirection::parse("sideways"), None);
+        assert!(ActivityDirection::Both.want_in() && ActivityDirection::Both.want_out());
+        assert!(ActivityDirection::Incoming.want_in() && !ActivityDirection::Incoming.want_out());
+    }
+
+    #[test]
+    fn address_normalization() {
+        let (addr, topic) =
+            EvmAdapter::normalize_address("0xA11Ce0000000000000000000000000000000dEaD").unwrap();
+        assert_eq!(addr, "0xa11ce0000000000000000000000000000000dead");
+        assert_eq!(
+            topic,
+            format!("0x{:0>64}", "a11ce0000000000000000000000000000000dead")
+        );
+        assert!(EvmAdapter::normalize_address("0x123").is_err());
+        assert!(EvmAdapter::normalize_address("not-an-address").is_err());
+        // 40-hex without prefix is still accepted (UIs paste both shapes).
+        let (a2, _) = EvmAdapter::normalize_address(&format!("0x{}", "a".repeat(40))).unwrap();
+        assert_eq!(a2, format!("0x{}", "a".repeat(40)));
     }
 
     // ------------------------------------------------------------ rpc mesh --

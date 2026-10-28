@@ -932,6 +932,17 @@ fn default_activity_window() -> u64 {
     1_500
 }
 
+/// Query parameters for the multi-network activity scan.
+#[derive(Deserialize)]
+struct AllActivityQuery {
+    /// Lookback window in blocks (clamped 200..20 000 by the adapter).
+    blocks: Option<u64>,
+    /// `in` | `out` | `both` (default `both`).
+    direction: Option<String>,
+    /// Comma-separated network filter (default: every configured network).
+    networks: Option<String>,
+}
+
 /// `GET /v1/wallet/activity` — PUBLIC incoming-transfer feed: the wallet's
 /// "money radar". Everything that landed on `address` on `network` inside
 /// the trailing window — every settleable token, real tx hashes, sender,
@@ -979,6 +990,40 @@ async fn wallet_activity(State(state): Ctx, Query(q): Query<ActivityQuery>) -> A
         "incoming_count": incoming_count,
         "note": "every incoming transfer is read straight from the chain — funds move address-to-address and PayPhone never holds them",
     })))
+}
+
+/// `GET /v1/wallet/:address/activity` — PUBLIC full-visibility activity scan
+/// (the superset of [`wallet_activity`]): one call fans out across EVERY
+/// configured EVM network, scanning BOTH directions for ANY token via
+/// topic-only `eth_getLogs` (adaptive chunks ride the RPC mesh). Each row
+/// carries the network the transfer ACTUALLY landed on — the network the
+/// sender used, not the one any UI picked — so “picked Optimism, sent on
+/// World Chain” still shows the money with a Worldscan link.
+/// Per-network gateway hiccups degrade to honest `notes`, never to hidden
+/// transfers. Overlapping polls share a 5 s server-side cache.
+async fn wallet_activity_all(State(state): Ctx, Path(address): Path<String>, Query(q): Query<AllActivityQuery>) -> ApiResult<Response> {
+    guard(&state, &format!("activity-all:{}", address.to_lowercase()))?;
+    let evm = state
+        .evm
+        .as_ref()
+        .ok_or_else(|| AppError::unavailable("no EVM RPC configured"))?;
+    let direction = crate::chains::evm::ActivityDirection::parse(q.direction.as_deref().unwrap_or("both"))
+        .ok_or_else(|| AppError::bad_request("direction must be one of: in, out, both"))?;
+    let networks: Option<Vec<String>> = q.networks.as_ref().map(|s| {
+        s.split(',')
+            .map(|n| n.trim().to_string())
+            .filter(|n| !n.is_empty())
+            .collect()
+    });
+    let payload = evm
+        .address_activity(
+            &address,
+            q.blocks.unwrap_or(crate::chains::evm::DEFAULT_ACTIVITY_WINDOW),
+            direction,
+            networks.as_deref(),
+        )
+        .await?;
+    Ok(ok(payload))
 }
 
 #[derive(Deserialize)]
@@ -1286,6 +1331,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/identity/escrow", post(create_escrow))
         .route("/v1/identity/claim", post(claim_escrow))
         .route("/v1/wallet/activity", get(wallet_activity))
+        .route("/v1/wallet/:address/activity", get(wallet_activity_all))
         .route("/v1/webhooks/test", post(test_webhook))
         .route("/v1/webhooks/verify", post(verify_webhook))
         .route("/v1/simnet/blocks", get(simnet_blocks))

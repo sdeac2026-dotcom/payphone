@@ -183,6 +183,28 @@ async function handle(method: string, path: string, body: Body, creds: { pk: str
     };
   }
 
+  // Multi-network wallet activity in the static demo: no live RPC exists in
+  // a browser-only build, so answer honestly — empty scan, demo-stamped.
+  if (routeKey.startsWith("GET /wallet/") && routeKey.endsWith("/activity")) {
+    const addr = routeKey.slice("GET /wallet/".length, -"/activity".length);
+    const blocks = Number(q.get("blocks") ?? 2000);
+    const nets = DEMO_NETWORKS.filter((n) => n.kind === "evm").map((n) => n.name);
+    return {
+      address: addr.toLowerCase(),
+      window_blocks: blocks,
+      scanned_networks: nets,
+      skipped_networks: [],
+      transfers: [],
+      transfer_count: 0,
+      native_balances: [],
+      block_time_secs: Object.fromEntries(nets.map((n) => [n, 2])),
+      notes: ["static demo — live chain scans need the real engine (self-host or use the production deployment)"],
+      scanned_at: now,
+      cache: "miss",
+      demo_mode: true,
+    };
+  }
+
   if (routeKey === "GET /chains") {
     return {
       networks: DEMO_NETWORKS.map((n) => ({
