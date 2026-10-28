@@ -132,6 +132,30 @@ try:
 except Exception as e:
     check("fee schedule public", False, repr(e))
 
+# 8. wallet money-radar — WLD on OP Mainnet + incoming-transfer feed
+print("\n[8] wallet money-radar (WLD on OP Mainnet + incoming feed)")
+BRIDGE = "0x4200000000000000000000000000000000000010"  # OP L2 Standard Bridge
+try:
+    code, raw = get("/api/v1/chains", timeout=60)
+    nets = json.loads(raw).get("data", {}).get("networks", [])
+    op = next((n for n in nets if n.get("name") == "optimism"), {})
+    symbols = [t.get("symbol") for t in op.get("settleable_tokens", [])]
+    check("WLD settleable on optimism (exchange withdrawals arrive)",
+          "WLD" in symbols, str(symbols))
+except Exception as e:
+    check("WLD settleable on optimism (exchange withdrawals arrive)", False, repr(e))
+try:
+    code, raw = get(f"/api/v1/wallet/activity?network=optimism&address={BRIDGE}&blocks=200",
+                    timeout=90)
+    d = json.loads(raw).get("data", {})
+    check("wallet activity feed live (incoming rows + native balance + conf policy)",
+          isinstance(d.get("incoming"), list) and "native_balance" in d
+          and d.get("confirmations_required") == 8 and d.get("network") == "optimism",
+          json.dumps(d)[:200])
+except Exception as e:
+    check("wallet activity feed live (incoming rows + native balance + conf policy)",
+          False, repr(e))
+
 print()
 print(f"RESULT: {len(passed)} passed, {len(failed)} failed")
 if failed:

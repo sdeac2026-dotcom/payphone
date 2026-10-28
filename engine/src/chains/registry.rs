@@ -20,6 +20,12 @@
 //! - worldchain (chain 480) added 2026-10-27: `eth_chainId` = 0x1e0 on the
 //!   official Alchemy public RPC; USDC / USDT0 / WLD each passed a live
 //!   `symbol()`+`decimals()` probe (explorer cross-checked worldscan.org).
+//! - optimism WLD added 2026-10-28: `symbol()` = "WLD", `decimals()` = 18
+//!   probed live on two independent gateways (mainnet.optimism.io +
+//!   PublicNode); address cross-checked against Coinbase Assets' listing
+//!   post, OKLink and optimistic.etherscan. Why it matters: exchanges
+//!   (OKX among them) ship WLD withdrawals over OP Mainnet — a PayPhone
+//!   address must receive and DISPLAY them, not silently ignore them.
 //!
 //! Adding a network = one `NetworkSpec` entry. Adding a token = one
 //! `TokenSpec` entry (verified). Adding an invoice-able asset = one
@@ -199,6 +205,12 @@ pub const NETWORKS: &[NetworkSpec] = &[
             "TUSD"  => ("0xcB59a0A753FdB7491d5F3d794316F1adE197b21E", 18),
             "FRAX"  => ("0x2e3D870790dC77A83DD1d18184Acc7439A53f475", 18),
             "cbETH" => ("0xADDb6A0412De1ba0F936dCAeb8aA24578dCF3b2", 18),
+            // Worldcoin's OP Mainnet deployment — probed live 2026-10-28
+            // (symbol WLD, 18dp, two gateways) and cross-checked against
+            // Coinbase Assets + OKLink + optimistic.etherscan. This is the
+            // contract exchanges credit when a user withdraws WLD and picks
+            // "Optimism" as the network.
+            "WLD"   => ("0xdc6ff44d5d932cbd77b52e5612ba0529dc6226f1", 18),
         ],
     },
     NetworkSpec {
@@ -509,8 +521,21 @@ mod tests {
         assert_eq!(usdt0.decimals, 6);
         // Native ETH resolves to no ERC-20, like every other network.
         assert!(resolve_token("worldchain", "ETH").is_none());
-        // WLD settles ONLY on worldchain (its home network).
-        assert_eq!(settleable_networks("WLD"), vec![("evm", "worldchain")]);
+        // WLD settles on its home network (World Chain) AND on OP Mainnet,
+        // where exchanges (OKX included) credit WLD withdrawals. NETWORKS
+        // order ⇒ optimism sorts before worldchain.
+        assert_eq!(
+            settleable_networks("WLD"),
+            vec![("evm", "optimism"), ("evm", "worldchain")]
+        );
+        // OP Mainnet WLD contract — live-probed 2026-10-28, cross-checked
+        // against Coinbase Assets / OKLink / optimistic.etherscan.
+        let wld_op = resolve_token("optimism", "WLD").unwrap();
+        assert_eq!(wld_op.decimals, 18);
+        assert_eq!(
+            wld_op.address.to_lowercase(),
+            "0xdc6ff44d5d932cbd77b52e5612ba0529dc6226f1"
+        );
         // USDT (plain) must NOT resolve on worldchain — there it is USDT0.
         assert!(resolve_token("worldchain", "USDT").is_none());
     }

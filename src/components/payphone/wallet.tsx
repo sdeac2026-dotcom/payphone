@@ -27,8 +27,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 import {
-  AlertTriangle, ArrowRightLeft, CheckCircle2, Copy, Eye, ExternalLink,
-  KeyRound, Lock, Plus, Send, ShieldCheck, Trash2, Wallet as WalletIcon,
+  AlertTriangle, ArrowDownToLine, ArrowRightLeft, CheckCircle2, Copy, Eye, ExternalLink,
+  KeyRound, Loader2, Lock, Plus, RefreshCw, Send, ShieldCheck, Trash2, Wallet as WalletIcon,
 } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
 import { SendRightNotice } from "./asset-safety";
@@ -36,10 +36,12 @@ import {
   WALLET_CHAINS, activityLog, feePreview, walletAddress, walletAddressStored,
   walletBalances, walletCreate, walletDestroy, walletExists,
   walletImportMnemonic, walletImportPrivateKey, walletIsUnlocked, walletLock,
-  walletRevealSecret, walletSend, resolveRecipient, walletUnlock,
+  walletRevealSecret, walletSend, resolveRecipient, walletUnlock, walletIncoming,
   type Recipient, type SendResult, type TokenBalance, type WalletActivity,
+  type WalletRadar,
 } from "@/lib/payphone/wallet";
 import { WALLET_SEND_FEE_BPS } from "@/lib/payphone/wallet";
+import { ApiError } from "@/lib/payphone/api";
 
 export interface WalletPrefill {
   network?: string;
@@ -279,6 +281,9 @@ function WalletMain({ prefill, onChanged }: { prefill?: WalletPrefill; onChanged
   const [sending, setSending] = useState(false);
   const [result, setResult] = useState<SendResult | null>(null);
   const [activity, setActivity] = useState<WalletActivity[]>([]);
+  const [radar, setRadar] = useState<WalletRadar | null>(null);
+  const [radarBusy, setRadarBusy] = useState(false);
+  const [radarErr, setRadarErr] = useState<string | null>(null);
   const [reveal, setReveal] = useState<string | null>(null);
   const [revealPass, setRevealPass] = useState("");
 
@@ -297,6 +302,34 @@ function WalletMain({ prefill, onChanged }: { prefill?: WalletPrefill; onChanged
 
   useEffect(() => { loadBalances(); }, [loadBalances]);
   useEffect(() => { setActivity(activityLog()); }, []);
+
+  // ---- money radar: incoming transfers, live from the chain ---------------
+  // A deposit that lands while this tab is open appears on its own within
+  // ~20 s — no refresh, no support ticket, no "where is my money".
+  const loadRadar = useCallback(async () => {
+    if (!addr) return;
+    setRadarBusy(true);
+    setRadarErr(null);
+    try {
+      setRadar(await walletIncoming(chain, addr));
+    } catch (e) {
+      // Static-demo build (GitHub Pages): the in-browser demo engine has no
+      // live chain behind it — show the calm empty state, never an error.
+      if (e instanceof ApiError && e.type === "demo_error") {
+        setRadar({ network: chain.name, native_asset: "", native_balance: "", incoming: [], incoming_count: 0 });
+      } else {
+        setRadarErr(String((e as Error).message ?? e));
+      }
+    } finally {
+      setRadarBusy(false);
+    }
+  }, [chain, addr]);
+
+  useEffect(() => { loadRadar(); }, [loadRadar]);
+  useEffect(() => {
+    const t = setInterval(loadRadar, 20_000);
+    return () => clearInterval(t);
+  }, [loadRadar]);
 
   // Live recipient resolution: phone → PayPhone identity (fee-free), 0x → external.
   useEffect(() => {
@@ -474,9 +507,77 @@ function WalletMain({ prefill, onChanged }: { prefill?: WalletPrefill; onChanged
         </Card>
       </div>
 
+      {/* incoming — the money radar */}
+      <Card className="border-emerald-500/30">
+        <CardHeader className="flex-row items-start justify-between space-y-0">
+          <div className="space-y-1.5">
+            <CardTitle className="flex items-center gap-2 text-base">
+              <ArrowDownToLine className="h-4 w-4 text-emerald-600" /> Incoming — live on {chain.label}
+            </CardTitle>
+            <p className="text-sm text-muted-foreground">
+              Everything sent to your address appears here automatically, read straight from the chain — you never have to wonder where your money is.
+            </p>
+          </div>
+          <Button size="sm" variant="outline" onClick={loadRadar} disabled={radarBusy}>
+            {radarBusy
+              ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+              : <RefreshCw className="mr-1.5 h-3.5 w-3.5" />}
+            Refresh
+          </Button>
+        </CardHeader>
+        <CardContent className="space-y-2">
+          {radarErr && (
+            <p className="text-xs text-amber-600">
+              Radar hiccup ({radarErr}) — balances are unaffected; it retries automatically.
+            </p>
+          )}
+          {radar && radar.incoming.length > 0 && (
+            <div className="space-y-1.5">
+              {radar.incoming.slice(0, 8).map((t, i) => (
+                <div key={`${t.tx_hash}-${t.asset}-${i}`} className="flex flex-wrap items-center justify-between gap-2 rounded-md border px-3 py-2 text-sm">
+                  <span className="flex flex-wrap items-center gap-2">
+                    <Badge variant="outline" className={t.confirmed ? "border-emerald-500/40 text-emerald-600" : "border-amber-500/40 text-amber-600"}>
+                      {t.confirmed
+                        ? <><CheckCircle2 className="mr-1 h-3 w-3" /> Confirmed · {t.confirmations} confs</>
+                        : <><Loader2 className="mr-1 h-3 w-3 animate-spin" /> Detected — finalizing {t.confirmations}/{t.required_confirmations}</>}
+                    </Badge>
+                    <span className="font-medium text-emerald-700">+{t.qty} {t.asset}</span>
+                    <span className="text-xs text-muted-foreground">from {short(t.from)}</span>
+                  </span>
+                  <a
+                    className="flex items-center gap-1 text-xs text-primary underline-offset-2 hover:underline"
+                    href={t.explorer_url}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    View on explorer <ExternalLink className="h-3 w-3" />
+                  </a>
+                </div>
+              ))}
+            </div>
+          )}
+          {radar && radar.incoming.length === 0 && (
+            <div className="space-y-1.5 rounded-md border border-dashed px-3 py-4 text-sm text-muted-foreground">
+              <p>Nothing has landed here recently — if something does, it shows up on its own within seconds, with the tx hash and explorer link.</p>
+              <p className="text-xs">
+                Withdrawing from an exchange (OKX, Binance…)? Pick the network matching this tab — WLD arrives on <b>OP Mainnet</b> when you select Optimism in the withdrawal dialog, on <b>Worldchain</b> when you select World Chain. Picked the other one? The funds are still yours — they are on that other chain; switch this tab&apos;s network and they are right here.
+              </p>
+            </div>
+          )}
+          {radar && (
+            <p className="text-xs text-muted-foreground">
+              Watches every settleable token on {chain.label} · updates every 20 s while this tab is open · native {radar.native_asset} balance {radar.native_balance ? radar.native_balance : "—"}
+            </p>
+          )}
+        </CardContent>
+      </Card>
+
       {/* activity */}
       <Card>
-        <CardHeader><CardTitle className="text-base">Activity</CardTitle></CardHeader>
+        <CardHeader>
+          <CardTitle className="text-base">Activity — your sends</CardTitle>
+          <p className="text-sm text-muted-foreground">Transfers signed in this browser. Incoming money lives in the Incoming feed above.</p>
+        </CardHeader>
         <CardContent>
           {activity.length === 0 ? (
             <p className="text-sm text-muted-foreground">No sends yet from this browser.</p>

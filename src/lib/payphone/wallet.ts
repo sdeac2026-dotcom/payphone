@@ -614,3 +614,46 @@ function logActivity(entry: WalletActivity): void {
     /* storage full/unavailable — non-fatal */
   }
 }
+
+// -------------------------------------------------------- incoming (radar) --
+
+/** One on-chain incoming transfer, exactly as the engine's feed reports it. */
+export interface IncomingTransfer {
+  asset: string;
+  qty: string;
+  from: string;
+  tx_hash: string;
+  block: number;
+  confirmations: number;
+  required_confirmations: number;
+  confirmed: boolean;
+  status: string; // "confirmed" | "detected"
+  explorer_url: string;
+}
+
+export interface WalletRadar {
+  network: string;
+  native_asset: string;
+  native_balance: string;
+  incoming: IncomingTransfer[];
+  incoming_count: number;
+}
+
+/**
+ * "Money radar" — everything that landed on `address` on chain `c` inside
+ * the engine's trailing look-back window, read straight from the public
+ * activity feed (which reads the chain through the RPC mesh). This is how a
+ * deposit from an exchange (OKX → WLD on OP Mainnet, say) surfaces with a
+ * tx hash, sender and explorer link within seconds of landing — instead of
+ * the user staring at a balance wondering where their money went.
+ */
+export async function walletIncoming(c: WalletChain, address: string): Promise<WalletRadar> {
+  const r = await api.walletActivity(c.name, address);
+  return {
+    network: r.network,
+    native_asset: r.native_asset,
+    native_balance: r.native_balance,
+    incoming: r.incoming,
+    incoming_count: r.incoming_count,
+  };
+}

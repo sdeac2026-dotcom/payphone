@@ -544,6 +544,84 @@ impl EvmAdapter {
         let observed = current.saturating_sub(invoice.base_qty);
         Ok(crate::chains::Observation { observed_qty: observed, receipts: vec![] })
     }
+
+    /// Incoming-transfer visibility — the wallet "money radar".
+    ///
+    /// Every tracked ERC-20 `Transfer` event **to** `wallet` across ALL
+    /// settleable tokens on `network`, within the trailing `window` blocks.
+    /// This is what lets a consumer wallet say "your deposit landed" with a
+    /// tx hash, sender and explorer link the moment it is on-chain — instead
+    /// of a balance that mysteriously moved and an anxious user.
+    ///
+    /// Same confirmation semantics as invoice observation
+    /// ([`registry`]): a row is `confirmed` only at finality depth;
+    /// before that it is "detected — finalizing". Newest first, capped at
+    /// 50 rows, zero-value transfers dropped as noise.
+    pub async fn incoming_transfers(
+        &self,
+        network: &str,
+        wallet: &str,
+        window: u64,
+    ) -> ApiResult<Vec<serde_json::Value>> {
+        let spec = registry::find(network)
+            .ok_or_else(|| AppError::bad_request(format!("unknown network '{network}'")))?;
+        let tip = self.block_number(network).await?;
+        let from = tip.saturating_sub(window);
+        let mut rows: Vec<serde_json::Value> = Vec::new();
+        for t in spec.tokens {
+            let logs = match self
+                .transfer_logs_to(network, &t.address, wallet, from, tip)
+                .await
+            {
+                Ok(l) => l,
+                // One token's gateway hiccup must not hide the others —
+                // visibility beats completeness here; the balance card and
+                // the next poll cover the rest.
+                Err(_) => continue,
+            };
+            for log in &logs {
+                let (qty, block, tx_hash) = match decode_transfer(log) {
+                    Some(v) => v,
+                    None => continue,
+                };
+                // Defensive recipient check (RPC filtered, decode-check is
+                // cheap) before surfacing the row.
+                match log["topics"].get(2).and_then(|v| v.as_str()) {
+                    Some(t) if topic_matches(t, wallet) => {}
+                    _ => continue,
+                }
+                if qty == 0 {
+                    continue;
+                }
+                let from = log["topics"]
+                    .get(1)
+                    .and_then(|v| v.as_str())
+                    .and_then(topic_to_address)
+                    .unwrap_or_default();
+                let confirmations = tip.saturating_sub(block);
+                let confirmed = confirmations >= spec.confirmations;
+                rows.push(json!({
+                    "asset": t.symbol,
+                    "qty": base_units_to_decimal(qty, t.decimals),
+                    "from": from,
+                    "tx_hash": tx_hash,
+                    "block": block,
+                    "confirmations": confirmations,
+                    "required_confirmations": spec.confirmations,
+                    "confirmed": confirmed,
+                    "status": if confirmed { "confirmed" } else { "detected" },
+                    "explorer_url": format!("{}{}", spec.explorer_tx, tx_hash),
+                }));
+            }
+        }
+        rows.sort_by(|a, b| {
+            let ka = (a["block"].as_u64().unwrap_or(0), a["tx_hash"].as_str().unwrap_or(""));
+            let kb = (b["block"].as_u64().unwrap_or(0), b["tx_hash"].as_str().unwrap_or(""));
+            kb.cmp(&ka) // newest first; hash tiebreak keeps the order stable
+        });
+        rows.truncate(50);
+        Ok(rows)
+    }
 }
 
 /// Decode one ERC-20 `Transfer` log → (value in base units, block, tx hash).
@@ -574,6 +652,17 @@ pub fn topic_matches(topic: &str, address: &str) -> bool {
     let a = address.to_lowercase();
     let a = a.strip_prefix("0x").unwrap_or(&a);
     t.len() == 64 && t.ends_with(a)
+}
+
+/// Un-pad a 32-byte topic back into the 20-byte address it encodes
+/// (`0x` + last 40 hex chars, checksum-free lowercase display form).
+/// `None` when the topic is not a padded address at all.
+pub fn topic_to_address(topic: &str) -> Option<String> {
+    let t = topic.strip_prefix("0x").unwrap_or(topic);
+    if t.len() != 64 || !t.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(format!("0x{}", &t[t.len() - 40..].to_lowercase()))
 }
 
 /// Parse a `0x…` quantity into u128 (rejects overflow and junk).
@@ -646,6 +735,17 @@ mod tests {
         assert!(topic_matches(&topic, addr.to_uppercase().as_str()));
         assert!(!topic_matches(&topic, "0xdead00000000000000000000000000000000beef"));
         assert!(!topic_matches("0x1234", addr));
+    }
+
+    #[test]
+    fn topic_unpads_to_address() {
+        let addr = "0xa11ce0000000000000000000000000000000dEaD";
+        let topic = format!("0x{:0>64}", &addr[2..].to_lowercase());
+        assert_eq!(topic_to_address(&topic).as_deref(), Some("0xa11ce0000000000000000000000000000000dead"));
+        // Malformed topics never decode — wrong length, junk nibbles.
+        assert_eq!(topic_to_address("0x1234"), None);
+        assert_eq!(topic_to_address("0xzz0000000000000000000000000000000000000000000000000000000000dead"), None);
+        assert_eq!(topic_to_address(""), None);
     }
 
     #[test]

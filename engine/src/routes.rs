@@ -914,6 +914,73 @@ async fn lookup_phone(State(state): Ctx, body: axum::body::Bytes) -> ApiResult<R
     })))
 }
 
+// ---------------------------------------------------------------- wallet ---
+
+#[derive(Deserialize)]
+struct ActivityQuery {
+    network: String,
+    address: String,
+    /// Trailing look-back window in blocks (clamped 100..10 000). Default
+    /// 1 500 ≈ 50 min on a 2 s-block rollup (OP/World Chain/Base), ~5 h on
+    /// Ethereum, ~1.25 h on Polygon — always longer than an exchange
+    /// withdrawal's "processing" phase.
+    #[serde(default = "default_activity_window")]
+    blocks: u64,
+}
+
+fn default_activity_window() -> u64 {
+    1_500
+}
+
+/// `GET /v1/wallet/activity` — PUBLIC incoming-transfer feed: the wallet's
+/// "money radar". Everything that landed on `address` on `network` inside
+/// the trailing window — every settleable token, real tx hashes, sender,
+/// confirmation state and explorer links. This is the anti-anxiety feature:
+/// a deposit from an exchange (OKX → WLD on OP Mainnet, say) shows up here
+/// the moment it is on-chain, before the user has time to panic.
+///
+/// No auth — a consumer wallet holds no API keys (same posture as
+/// `/v1/identity/lookup`); rate-limited per looked-up address; carries no
+/// secrets and holds nothing — it only READS public chain data. Native-asset
+/// deposits are covered by `native_balance` (they emit no Transfer logs).
+async fn wallet_activity(State(state): Ctx, Query(q): Query<ActivityQuery>) -> ApiResult<Response> {
+    let spec = registry::find(&q.network).ok_or_else(|| {
+        AppError::bad_request(format!("unknown network '{}' — see GET /v1/chains", q.network))
+    })?;
+    crate::phone::validate_wallet("evm", &q.address)?;
+    let window = q.blocks.clamp(100, 10_000);
+    guard(&state, &format!("activity:{}", q.address.to_lowercase()))?;
+    let evm = state
+        .evm
+        .as_ref()
+        .ok_or_else(|| AppError::unavailable("no EVM RPC configured"))?;
+
+    // Native balance stays visible even when token reads hiccup (empty
+    // string = unreadable — the UI shows "—", never a fake zero).
+    let native_balance = evm
+        .balance(&q.network, &q.address, None)
+        .await
+        .map(|b| {
+            crate::chains::evm::base_units_to_decimal(b, registry::native_decimals(&q.network))
+        })
+        .unwrap_or_default();
+
+    let incoming = evm.incoming_transfers(&q.network, &q.address, window).await?;
+    let incoming_count = incoming.len();
+    Ok(ok(json!({
+        "network": spec.name,
+        "chain_id": spec.chain_id,
+        "address": q.address,
+        "window_blocks": window,
+        "native_asset": spec.native,
+        "native_balance": native_balance,
+        "confirmations_required": spec.confirmations,
+        "incoming": incoming,
+        "incoming_count": incoming_count,
+        "note": "every incoming transfer is read straight from the chain — funds move address-to-address and PayPhone never holds them",
+    })))
+}
+
 #[derive(Deserialize)]
 struct RegisterReq {
     phone: String,
@@ -1218,6 +1285,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/identity/register", post(register_phone))
         .route("/v1/identity/escrow", post(create_escrow))
         .route("/v1/identity/claim", post(claim_escrow))
+        .route("/v1/wallet/activity", get(wallet_activity))
         .route("/v1/webhooks/test", post(test_webhook))
         .route("/v1/webhooks/verify", post(verify_webhook))
         .route("/v1/simnet/blocks", get(simnet_blocks))

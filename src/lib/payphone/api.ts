@@ -318,6 +318,43 @@ export const api = {
       { escrow_id, phone, code }
     ),
 
+  // --------------------------------------------------------------- wallet ----
+
+  /**
+   * PUBLIC incoming-transfer feed ("money radar"): everything that landed
+   * on `address` on `network` inside the trailing block window — every
+   * settleable token, real tx hashes, sender, confirmation state, explorer
+   * links. No merchant keys required (same public posture as identity
+   * lookup); the engine only reads public chain data.
+   */
+  walletActivity: (network: string, address: string, blocks = 1500) =>
+    request<{
+      network: string;
+      chain_id: number;
+      address: string;
+      window_blocks: number;
+      native_asset: string;
+      native_balance: string;
+      confirmations_required: number;
+      incoming: {
+        asset: string;
+        qty: string;
+        from: string;
+        tx_hash: string;
+        block: number;
+        confirmations: number;
+        required_confirmations: number;
+        confirmed: boolean;
+        status: string;
+        explorer_url: string;
+      }[];
+      incoming_count: number;
+      note: string;
+    }>(
+      "GET",
+      `/wallet/activity?network=${encodeURIComponent(network)}&address=${encodeURIComponent(address)}&blocks=${blocks}`
+    ),
+
   // --------------------------------------------------------------- simnet ----
 
   simnetPay: (input: { to: string; asset: string; amount_minor: number; invoice_id?: string; from?: string; token?: string }) =>
