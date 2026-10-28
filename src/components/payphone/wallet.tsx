@@ -36,12 +36,11 @@ import {
   WALLET_CHAINS, activityLog, feePreview, walletAddress, walletAddressStored,
   walletBalances, walletCreate, walletDestroy, walletExists,
   walletImportMnemonic, walletImportPrivateKey, walletIsUnlocked, walletLock,
-  walletRevealSecret, walletSend, resolveRecipient, walletUnlock, walletIncoming,
+  walletRevealSecret, walletSend, resolveRecipient, walletUnlock,
   type Recipient, type SendResult, type TokenBalance, type WalletActivity,
-  type WalletRadar,
 } from "@/lib/payphone/wallet";
 import { WALLET_SEND_FEE_BPS } from "@/lib/payphone/wallet";
-import { ApiError } from "@/lib/payphone/api";
+import { api, ApiError, type WalletActivityAll } from "@/lib/payphone/api";
 
 export interface WalletPrefill {
   network?: string;
@@ -281,7 +280,7 @@ function WalletMain({ prefill, onChanged }: { prefill?: WalletPrefill; onChanged
   const [sending, setSending] = useState(false);
   const [result, setResult] = useState<SendResult | null>(null);
   const [activity, setActivity] = useState<WalletActivity[]>([]);
-  const [radar, setRadar] = useState<WalletRadar | null>(null);
+  const [radar, setRadar] = useState<WalletActivityAll | null>(null);
   const [radarBusy, setRadarBusy] = useState(false);
   const [radarErr, setRadarErr] = useState<string | null>(null);
   const [reveal, setReveal] = useState<string | null>(null);
@@ -303,27 +302,35 @@ function WalletMain({ prefill, onChanged }: { prefill?: WalletPrefill; onChanged
   useEffect(() => { loadBalances(); }, [loadBalances]);
   useEffect(() => { setActivity(activityLog()); }, []);
 
-  // ---- money radar: incoming transfers, live from the chain ---------------
-  // A deposit that lands while this tab is open appears on its own within
+  // ---- money radar: every transfer, EVERY network, live from the chain -----
+  // One scan fans out across all supported EVM networks and reports every
+  // token transfer touching this address — incoming AND outgoing — each
+  // labeled with the network it ACTUALLY landed on (the network the sender
+  // used, never the one any UI picked). "Picked Optimism, the exchange sent
+  // on World Chain" still shows the money, with its explorer link, within
   // ~20 s — no refresh, no support ticket, no "where is my money".
   const loadRadar = useCallback(async () => {
     if (!addr) return;
     setRadarBusy(true);
     setRadarErr(null);
     try {
-      setRadar(await walletIncoming(chain, addr));
+      setRadar(await api.walletActivityAll(addr, { direction: "both" }));
     } catch (e) {
       // Static-demo build (GitHub Pages): the in-browser demo engine has no
       // live chain behind it — show the calm empty state, never an error.
       if (e instanceof ApiError && e.type === "demo_error") {
-        setRadar({ network: chain.name, native_asset: "", native_balance: "", incoming: [], incoming_count: 0 });
+        setRadar({
+          address: addr, window_blocks: 0, scanned_networks: [], skipped_networks: [],
+          transfers: [], transfer_count: 0, native_balances: [], block_time_secs: {},
+          notes: [], scanned_at: 0, cache: "miss",
+        });
       } else {
         setRadarErr(String((e as Error).message ?? e));
       }
     } finally {
       setRadarBusy(false);
     }
-  }, [chain, addr]);
+  }, [addr]);
 
   useEffect(() => { loadRadar(); }, [loadRadar]);
   useEffect(() => {
@@ -507,15 +514,15 @@ function WalletMain({ prefill, onChanged }: { prefill?: WalletPrefill; onChanged
         </Card>
       </div>
 
-      {/* incoming — the money radar */}
+      {/* incoming & sends — the money radar, every network */}
       <Card className="border-emerald-500/30">
         <CardHeader className="flex-row items-start justify-between space-y-0">
           <div className="space-y-1.5">
             <CardTitle className="flex items-center gap-2 text-base">
-              <ArrowDownToLine className="h-4 w-4 text-emerald-600" /> Incoming — live on {chain.label}
+              <ArrowDownToLine className="h-4 w-4 text-emerald-600" /> Incoming &amp; sends — live on every network
             </CardTitle>
             <p className="text-sm text-muted-foreground">
-              Everything sent to your address appears here automatically, read straight from the chain — you never have to wonder where your money is.
+              Everything touching your address appears here automatically — scanned across ALL supported networks in one sweep, each transfer labeled with the network it <b>actually</b> landed on. You never have to wonder where your money is.
             </p>
           </div>
           <Button size="sm" variant="outline" onClick={loadRadar} disabled={radarBusy}>
@@ -531,42 +538,71 @@ function WalletMain({ prefill, onChanged }: { prefill?: WalletPrefill; onChanged
               Radar hiccup ({radarErr}) — balances are unaffected; it retries automatically.
             </p>
           )}
-          {radar && radar.incoming.length > 0 && (
-            <div className="space-y-1.5">
-              {radar.incoming.slice(0, 8).map((t, i) => (
-                <div key={`${t.tx_hash}-${t.asset}-${i}`} className="flex flex-wrap items-center justify-between gap-2 rounded-md border px-3 py-2 text-sm">
-                  <span className="flex flex-wrap items-center gap-2">
-                    <Badge variant="outline" className={t.confirmed ? "border-emerald-500/40 text-emerald-600" : "border-amber-500/40 text-amber-600"}>
-                      {t.confirmed
-                        ? <><CheckCircle2 className="mr-1 h-3 w-3" /> Confirmed · {t.confirmations} confs</>
-                        : <><Loader2 className="mr-1 h-3 w-3 animate-spin" /> Detected — finalizing {t.confirmations}/{t.required_confirmations}</>}
-                    </Badge>
-                    <span className="font-medium text-emerald-700">+{t.qty} {t.asset}</span>
-                    <span className="text-xs text-muted-foreground">from {short(t.from)}</span>
-                  </span>
-                  <a
-                    className="flex items-center gap-1 text-xs text-primary underline-offset-2 hover:underline"
-                    href={t.explorer_url}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    View on explorer <ExternalLink className="h-3 w-3" />
-                  </a>
-                </div>
+          {radar && radar.scanned_networks.length > 0 && (
+            <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+              <span className="text-muted-foreground">scanned:</span>
+              {radar.scanned_networks.map((n) => (
+                <Badge key={n} variant="secondary" className="text-[10px]">{n}</Badge>
+              ))}
+              {radar.skipped_networks.map((s) => (
+                <Badge key={s.network} variant="outline" className="text-[10px] text-amber-600" title={s.note}>
+                  {s.network} ⚠
+                </Badge>
+              ))}
+              {radar.native_balances.filter((nb) => nb.qty && nb.qty !== "0").map((nb) => (
+                <span key={nb.network} className="rounded border bg-background/60 px-1.5 py-0.5 font-mono text-[10px]">
+                  {nb.qty} {nb.asset} <span className="text-muted-foreground">on {nb.network}</span>
+                </span>
               ))}
             </div>
           )}
-          {radar && radar.incoming.length === 0 && (
+          {radar && radar.transfers.length > 0 && (
+            <div className="space-y-1.5">
+              {radar.transfers.slice(0, 12).map((t) => {
+                const isIn = t.direction === "in";
+                return (
+                  <div
+                    key={`${t.tx_hash}-${t.log_index}-${t.direction}`}
+                    className={`flex flex-wrap items-center justify-between gap-2 rounded-md border px-3 py-2 text-sm ${
+                      isIn ? "border-emerald-500/25 bg-emerald-500/[0.04]" : "border-amber-500/25 bg-amber-500/[0.04]"
+                    }`}
+                  >
+                    <span className="flex flex-wrap items-center gap-2">
+                      <Badge variant="outline" className={t.confirmed ? "border-emerald-500/40 text-emerald-600" : "border-amber-500/40 text-amber-600"}>
+                        {t.confirmed
+                          ? <><CheckCircle2 className="mr-1 h-3 w-3" /> Confirmed · {t.confirmations} confs</>
+                          : <><Loader2 className="mr-1 h-3 w-3 animate-spin" /> Detected — finalizing {t.confirmations}/{t.required_confirmations}</>}
+                      </Badge>
+                      <span className={`font-medium ${isIn ? "text-emerald-700" : "text-amber-700"}`}>
+                        {isIn ? "+" : "−"}{t.qty} {t.asset ?? short(t.asset_address)}
+                      </span>
+                      <Badge variant="outline" className="text-[10px] uppercase tracking-wide">{t.network}</Badge>
+                      <span className="text-xs text-muted-foreground">{isIn ? "from" : "to"} {short(t.counterparty)}</span>
+                    </span>
+                    <a
+                      className="flex items-center gap-1 text-xs text-primary underline-offset-2 hover:underline"
+                      href={t.explorer_url}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      Explorer <ExternalLink className="h-3 w-3" />
+                    </a>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          {radar && radar.transfers.length === 0 && (
             <div className="space-y-1.5 rounded-md border border-dashed px-3 py-4 text-sm text-muted-foreground">
-              <p>Nothing has landed here recently — if something does, it shows up on its own within seconds, with the tx hash and explorer link.</p>
+              <p>Nothing has landed yet — while this tab is open, every supported network is re-scanned every 20 s, and any transfer appears here on its own with the tx hash and an explorer link.</p>
               <p className="text-xs">
-                Withdrawing from an exchange (OKX, Binance…)? Pick the network matching this tab — WLD arrives on <b>OP Mainnet</b> when you select Optimism in the withdrawal dialog, on <b>Worldchain</b> when you select World Chain. Picked the other one? The funds are still yours — they are on that other chain; switch this tab&apos;s network and they are right here.
+                Withdrawing from an exchange (OKX, Binance…)? The network you pick in the withdrawal dialog is where the funds land — WLD rides <b>World Chain</b> or <b>OP Mainnet</b> depending on your pick. Picked one and expected the other? The money is still yours — the transfer shows right here under its real network either way.
               </p>
             </div>
           )}
           {radar && (
             <p className="text-xs text-muted-foreground">
-              Watches every settleable token on {chain.label} · updates every 20 s while this tab is open · native {radar.native_asset} balance {radar.native_balance ? radar.native_balance : "—"}
+              {radar.transfer_count} transfer{radar.transfer_count === 1 ? "" : "s"} in the recent window · watches EVERY settleable token across {radar.scanned_networks.length} networks · updates every 20 s while this tab is open.
             </p>
           )}
         </CardContent>

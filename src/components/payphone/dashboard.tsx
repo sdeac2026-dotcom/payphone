@@ -30,6 +30,7 @@ import {
   type WalletActivityAll,
 } from "@/lib/payphone/api";
 import type { EngineHealth, FeeSchedule, LocalInvoice } from "@/lib/payphone/types";
+import { walletAddressStored } from "@/lib/payphone/wallet";
 import { MonoValue, StatCard } from "./bits";
 
 const TIERS = ["free", "starter", "growth", "scale", "enterprise"] as const;
@@ -415,7 +416,11 @@ function agoLabel(confirmations: number, blockTimeSecs: number | undefined): str
 }
 
 function Activity({ merchant }: { merchant: MerchantSession }) {
-  const [address, setAddress] = useState(merchant.wallet);
+  // Default to the LOCAL PayPhone wallet when this browser holds one — the
+  // scan must watch the address the user actually receives on, not just the
+  // merchant payout wallet. (Watching a mismatched address is exactly how
+  // "explorer shows my transfer, dashboard shows nothing" used to happen.)
+  const [address, setAddress] = useState(walletAddressStored() ?? merchant.wallet);
   const [windowBlocks, setWindowBlocks] = useState<string>("2000");
   const [direction, setDirection] = useState<"both" | "in" | "out">("both");
   const [data, setData] = useState<WalletActivityAll | null>(null);
