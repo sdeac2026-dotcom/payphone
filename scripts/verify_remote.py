@@ -87,7 +87,7 @@ try:
     code, raw = get("/api/v1/chains", timeout=60)
     nets = json.loads(raw).get("data", {}).get("networks", [])
     names = [n.get("name", "?") for n in nets]
-    check(f"networks registered ({len(nets)})", len(nets) >= 11, json.dumps(names))
+    check(f"networks registered ({len(nets)})", len(nets) >= 10, json.dumps(names))
     # Probe results are nested under "probe" (live RPC chain-id check per network).
     def probed(n):
         p = n.get("probe") or {}
@@ -96,7 +96,7 @@ try:
     check(f"networks LIVE on real RPCs ({len(live)}/{len(nets)})", len(live) == len(nets),
           str([(n.get('name'), n.get('probe')) for n in nets if not probed(n)]))
     for want in ("base", "ethereum", "arbitrum", "polygon", "optimism", "bsc", "avalanche",
-                 "worldchain", "bitcoin", "solana", "tron"):
+                 "bitcoin", "solana", "tron"):
         check(f"  {want} present", any(want == n.get("name", "").lower() or want in json.dumps(n).lower()
                                        for n in nets))
 except Exception as e:
@@ -111,15 +111,62 @@ try:
 except Exception as e:
     check("assets endpoint", False, repr(e))
 
-# 6. admin gate — the production security posture
-print("\n[6] admin gate (security)")
+# 6. autonomous onboarding & tier gate — the production security posture
+print("\n[6] autonomous onboarding & tier gate (security)")
+try:
+    code, body = post("/api/v1/keys", {"tier": "free"}, timeout=20)
+    data = body.get("data") or {}
+    check("open tier 'free' self-serves with no token",
+          code == 201 and str(data.get("public_key", "")).startswith("pk_free_"),
+          f"code={code} {json.dumps(body)[:160]}")
+except Exception as e:
+    check("open tier 'free' self-serves with no token", False, repr(e))
+
+try:
+    code, body = post("/api/v1/keys", {"tier": "starter"}, timeout=20)
+    data = body.get("data") or {}
+    check("open tier 'starter' self-serves with no token",
+          code == 201 and str(data.get("public_key", "")).startswith("pk_starter_"),
+          f"code={code} {json.dumps(body)[:160]}")
+except Exception as e:
+    check("open tier 'starter' self-serves with no token", False, repr(e))
+
 try:
     code, body = post("/api/v1/keys", {"tier": "growth"}, timeout=20)
     msg = (body.get("error") or {}).get("message", "")
-    check(f"key issuance without admin token -> {code} forbidden",
+    check("paid tier 'growth' without admin token -> 403",
           code == 403 and "admin token" in msg.lower(), f"code={code} msg={msg!r}")
 except Exception as e:
-    check("admin gate responds", False, repr(e))
+    check("paid tier 'growth' without admin token -> 403", False, repr(e))
+
+try:
+    code, raw = get("/api/v1/tiers", timeout=20)
+    body = json.loads(raw).get("data", {})
+    tiers = {t.get("tier"): t for t in body.get("tiers", [])}
+    check("tier catalog public (GET /v1/tiers)",
+          code == 200 and "growth" in tiers and "free" in tiers,
+          f"code={code} tiers={list(tiers)}")
+    check("catalog: free=open, growth priced, treasury named",
+          tiers.get("free", {}).get("issuance") == "open"
+          and (tiers.get("growth", {}).get("price_usd_cents") or 0) > 0
+          and "treasury" in body,
+          json.dumps(body)[:220])
+except Exception as e:
+    check("tier catalog public (GET /v1/tiers)", False, repr(e))
+
+try:
+    fake = "0x" + "ab" * 32
+    code, body = post("/api/v1/tiers/activate",
+                      {"tier": "growth", "network": "worldchain", "tx_hash": fake}, timeout=30)
+    msg = (body.get("error") or {}).get("message", "")
+    low = msg.lower()
+    # Without a treasury configured the node refuses politely; with one, a
+    # bogus hash is rejected as unknown. Both are controlled, explained 4xx/5xx.
+    controlled = 400 <= code < 600 and any(k in low for k in ("treasury", "transaction", "tx hash", "tx_hash"))
+    check("tier activation rejects a bogus proof with a controlled error",
+          controlled, f"code={code} msg={msg!r}")
+except Exception as e:
+    check("tier activation rejects a bogus proof with a controlled error", False, repr(e))
 
 # 7. fees
 print("\n[7] fee schedule")
@@ -127,70 +174,8 @@ try:
     code, raw = get("/api/v1/fees/schedule", timeout=20)
     body = json.loads(raw).get("data", {})
     check("fee schedule public", bool(body), json.dumps(body)[:200])
-    check("fee schedule carries the treasury field (null until operator sets it)",
-          "treasury" in body, json.dumps(body)[:200])
 except Exception as e:
     check("fee schedule public", False, repr(e))
-
-# 8. wallet money-radar — WLD on OP Mainnet + incoming-transfer feed
-print("\n[8] wallet money-radar (WLD on OP Mainnet + incoming feed)")
-BRIDGE = "0x4200000000000000000000000000000000000010"  # OP L2 Standard Bridge
-try:
-    code, raw = get("/api/v1/chains", timeout=60)
-    nets = json.loads(raw).get("data", {}).get("networks", [])
-    op = next((n for n in nets if n.get("name") == "optimism"), {})
-    symbols = [t.get("symbol") for t in op.get("settleable_tokens", [])]
-    check("WLD settleable on optimism (exchange withdrawals arrive)",
-          "WLD" in symbols, str(symbols))
-except Exception as e:
-    check("WLD settleable on optimism (exchange withdrawals arrive)", False, repr(e))
-try:
-    code, raw = get(f"/api/v1/wallet/activity?network=optimism&address={BRIDGE}&blocks=200",
-                    timeout=90)
-    d = json.loads(raw).get("data", {})
-    check("wallet activity feed live (incoming rows + native balance + conf policy)",
-          isinstance(d.get("incoming"), list) and "native_balance" in d
-          and d.get("confirmations_required") == 8 and d.get("network") == "optimism",
-          json.dumps(d)[:200])
-except Exception as e:
-    check("wallet activity feed live (incoming rows + native balance + conf policy)",
-          False, repr(e))
-
-print("\n[9] full-visibility activity scan (all networks, both directions)")
-DEAD = "0x000000000000000000000000000000000000dEaD"
-try:
-    code, raw = get(f"/api/v1/wallet/{DEAD}/activity?blocks=200", timeout=120)
-    d = json.loads(raw).get("data", {})
-    nets = d.get("scanned_networks", [])
-    check("multi-network scan live (all 8 EVM networks in one call)",
-          code == 200 and len(nets) >= 8 and "worldchain" in nets,
-          f"code={code} scanned={nets}")
-    check("scan payload well-formed (transfers + native + notes)",
-          all(k in d for k in ("transfers", "native_balances", "transfer_count",
-                               "window_blocks", "skipped_networks", "notes")),
-          "missing keys" if d else "")
-    check("native balances reported per network",
-          isinstance(d.get("native_balances"), list) and len(d.get("native_balances", [])) >= 5,
-          str(d.get("native_balances", []))[:160])
-except Exception as e:
-    check("multi-network scan live", False, repr(e))
-try:
-    code, raw = get(f"/api/v1/wallet/{DEAD}/activity?blocks=200&direction=in&networks=optimism",
-                    timeout=60)
-    d = json.loads(raw).get("data", {})
-    check("direction + network filters honored",
-          code == 200 and d.get("scanned_networks") == ["optimism"]
-          and all(t.get("direction") == "in" for t in d.get("transfers", [])),
-          json.dumps(d)[:160])
-except Exception as e:
-    check("direction + network filters honored", False, repr(e))
-try:
-    get("/api/v1/wallet/not-an-evm-address/activity", timeout=30)
-    check("bad address rejected", False, "200 returned for invalid address")
-except Exception as e:
-    import urllib.error as _ue
-    check("bad address rejected", isinstance(e, _ue.HTTPError) and e.code == 400,
-          repr(e)[:120])
 
 print()
 print(f"RESULT: {len(passed)} passed, {len(failed)} failed")

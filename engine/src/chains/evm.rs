@@ -507,6 +507,34 @@ impl EvmAdapter {
             .ok_or_else(|| AppError::upstream("bad blockNumber"))
     }
 
+    /// Transaction + receipt + confirmation depth for one hash — the building
+    /// block of autonomous tier activation (payment proofs). The receipt is
+    /// `None` while the transaction is known but still pending in the mempool.
+    pub async fn transaction_with_receipt(
+        &self,
+        network: &str,
+        tx_hash: &str,
+    ) -> ApiResult<(serde_json::Value, Option<serde_json::Value>, u64)> {
+        let tx = self
+            .rpc(network, "eth_getTransactionByHash", json!([tx_hash]))
+            .await?;
+        if tx.is_null() || tx.as_object().map(|o| o.is_empty()).unwrap_or(true) {
+            return Err(AppError::not_found(
+                "transaction not found on this network — check the hash and the network name",
+            ));
+        }
+        let receipt = self
+            .rpc(network, "eth_getTransactionReceipt", json!([tx_hash]))
+            .await?;
+        let receipt = if receipt.is_null() { None } else { Some(receipt) };
+        let block = tx["blockNumber"]
+            .as_str()
+            .and_then(parse_hex_quantity)
+            .unwrap_or(0);
+        let tip = self.block_number(network).await?;
+        Ok((tx, receipt, tip.saturating_sub(block)))
+    }
+
     /// Fetch `Transfer` logs **to** `recipient` between two blocks (inclusive),
     /// chunked to stay inside public-RPC range limits. Returns raw log objects.
     async fn transfer_logs_to(

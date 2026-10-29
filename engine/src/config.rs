@@ -65,6 +65,15 @@ pub struct Config {
     /// Use an address valid on the settlement chains you serve (an EVM
     /// `0x…` address for the EVM networks, a `TP…` test address on Tron, etc.).
     pub treasury: Option<String>,
+    /// Autonomous tier-activation prices in USD cents — env
+    /// `PAYPHONE_TIER_PRICE_<TIER>_CENTS` (e.g.
+    /// `PAYPHONE_TIER_PRICE_GROWTH_CENTS=9900`). A priced tier can be
+    /// unlocked by ANYONE, ANYWHERE, without an admin token, by paying that
+    /// USD value on-chain to the treasury — the engine verifies the payment
+    /// (`POST /v1/tiers/activate`) and issues the tier's key. Unset →
+    /// admin-token issuance only. Defaults: growth $99, scale $499,
+    /// enterprise $1,999. `free`/`starter` are always open and never priced.
+    pub tier_prices: Vec<(String, u64)>,
 }
 
 impl Config {
@@ -197,6 +206,21 @@ impl Config {
         // earning revenue should always set it (it is the operator's wallet).
         let treasury = env_opt("PAYPHONE_TREASURY_ADDRESS");
 
+        // Autonomous tier activation: priced tiers unlock themselves when the
+        // payment lands on-chain (see /v1/tiers). Operator can reprice via
+        // env; free/starter stay open regardless.
+        let tier_price_env = |tier: &str, default: u64| -> u64 {
+            env::var(format!("PAYPHONE_TIER_PRICE_{}_CENTS", tier.to_uppercase()))
+                .ok()
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(default)
+        };
+        let tier_prices = vec![
+            ("growth".to_string(), tier_price_env("growth", 9_900)),
+            ("scale".to_string(), tier_price_env("scale", 49_900)),
+            ("enterprise".to_string(), tier_price_env("enterprise", 199_900)),
+        ];
+
         Self {
             port,
             master_key,
@@ -217,7 +241,20 @@ impl Config {
             production,
             revoked_keys,
             treasury,
+            tier_prices,
         }
+    }
+
+    /// Activation price (USD cents) for a tier, if it can be bought on-chain.
+    /// Open tiers (`free`, `starter`) are never priced — they are free.
+    pub fn tier_price(&self, tier: &str) -> Option<u64> {
+        if matches!(tier, "free" | "starter") {
+            return None;
+        }
+        self.tier_prices
+            .iter()
+            .find(|(t, _)| t == tier)
+            .map(|(_, price)| *price)
     }
 
     /// True if an EVM endpoint is configured for the given network.

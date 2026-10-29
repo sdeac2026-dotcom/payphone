@@ -70,6 +70,8 @@ into the merchant relationship (enforced by key issuance); the on-chain
 4. **Tier subscriptions** — optional; the included-volume thresholds make
    high-volume merchants upgrade naturally. Metering is stateless today
    (tier in the key) with on-chain metering in the FeeVault as the v2 path.
+   Upgrades are **autonomous**: `free`/`starter` are open self-service, and
+   the priced tiers unlock themselves — see below.
 5. **Commercial licenses** — the dual-licensing track: businesses that want
    to run modified or white-labeled PayPhone **without** the AGPL
    source-disclosure obligation buy a commercial license
@@ -77,6 +79,30 @@ into the merchant relationship (enforced by key issuance); the on-chain
    The AGPL keeps the network open forever; commercial licensing turns that
    openness into lifetime revenue. Contributions are dual-licensed by
    policy (see CONTRIBUTING.md) so both tracks stay legally clean.
+
+## Autonomous tier activation (no admin token, no sales call)
+
+Merchant onboarding is worldwide and self-driving:
+
+- `free` and `starter` — open tiers. Anyone, anywhere, `POST /v1/keys`
+  with no token and no human in the loop.
+- `growth`, `scale`, `enterprise` — priced tiers (defaults $99 / $499 /
+  $1,999 USD; reprice per node via `PAYPHONE_TIER_PRICE_<TIER>_CENTS`).
+  A merchant pays the tier's USD value **to the treasury address** — any
+  supported asset (stablecoins at parity, everything else at the live
+  oracle rate) on any supported EVM network — then calls
+  `POST /v1/tiers/activate {tier, network, tx_hash}`. The engine verifies
+  the payment **on-chain** (mined + successful, treasury as recipient,
+  the network's confirmation depth, full price coverage) and returns the
+  new tier's key. One `tx_hash` unlocks one tier exactly once.
+- The `X-Admin-Token` remains the operator override: it issues any tier
+  instantly (comp deals, partners, internal keys) without payment.
+- Requires `PAYPHONE_TREASURY_ADDRESS` to be set — with no treasury, paid
+  tiers fall back to admin-only and the API says so plainly.
+
+This is the "network is free, capability is paid" rule enforced by
+protocol instead of by personnel: the system's own rules — pay, prove,
+activate — run 24/7 without the operator issuing tokens by hand.
 
 ## Why this design sustains the network
 

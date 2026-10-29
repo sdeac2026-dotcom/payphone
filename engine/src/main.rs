@@ -90,6 +90,7 @@ async fn main() {
         limiter: RateLimiter::new(config.rate_limit_per_min),
         started: Instant::now(),
         chain_probe: std::sync::Mutex::new(std::collections::HashMap::new()),
+        tier_used_tx: std::sync::Mutex::new(std::collections::HashSet::new()),
     });
 
     // ---- CORS --------------------------------------------------------------

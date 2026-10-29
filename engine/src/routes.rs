@@ -42,6 +42,10 @@ pub struct AppState {
     pub started: Instant,
     /// Cached live RPC probes for `/v1/chains` (network → (payload, ts)).
     pub chain_probe: std::sync::Mutex<std::collections::HashMap<String, (serde_json::Value, u64)>>,
+    /// Tier-activation replay guard: `network:tx_hash` pairs already consumed
+    /// by `POST /v1/tiers/activate` (per-process memory — a restart forgets;
+    /// rotating `PAYPHONE_TREASURY_ADDRESS` invalidates all historic proofs).
+    pub tier_used_tx: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
 pub type Ctx = State<Arc<AppState>>;
@@ -156,21 +160,32 @@ struct IssueKeyReq {
 }
 
 /// `POST /v1/keys` — issue a merchant credential. The secret is shown ONCE.
-/// In production, gate with `X-Admin-Token` (set `PAYPHONE_ADMIN_TOKEN`).
+///
+/// Autonomous onboarding: `free` and `starter` are OPEN — anyone, anywhere,
+/// self-serves without any token. Higher tiers carry the operator's pricing,
+/// so they need either the `X-Admin-Token` (set `PAYPHONE_ADMIN_TOKEN`) or —
+/// tokenless and worldwide — an on-chain payment to the treasury via
+/// `POST /v1/tiers/activate`.
 async fn issue_key(State(state): Ctx, headers: HeaderMap, body: axum::body::Bytes) -> ApiResult<Response> {
     guard(&state, "keys")?;
-    // Optional admin gate.
-    if let Ok(admin) = std::env::var("PAYPHONE_ADMIN_TOKEN") {
-        let provided = headers
-            .get("x-admin-token")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        if provided != admin {
-            return Err(AppError::forbidden("admin token required to issue keys"));
-        }
-    }
     let req: IssueKeyReq = parse_body(&body)?;
     let tier = Tier::parse(&req.tier)?;
+
+    // Open tiers skip the gate entirely; paid tiers stay operator-gated here
+    // (the tokenless payment path lives in /v1/tiers/activate).
+    if !matches!(tier, Tier::Free | Tier::Starter) {
+        if let Ok(admin) = std::env::var("PAYPHONE_ADMIN_TOKEN") {
+            let provided = headers
+                .get("x-admin-token")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            if provided != admin {
+                return Err(AppError::forbidden(
+                    "admin token required for this tier — or unlock it autonomously via POST /v1/tiers/activate (on-chain payment to the treasury)",
+                ));
+            }
+        }
+    }
     let (pk, sk) = keys::issue_key(&state.config.master_key, tier);
     let fee = fees::for_tier(tier.as_str());
     Ok(ok_created(json!({
@@ -179,6 +194,281 @@ async fn issue_key(State(state): Ctx, headers: HeaderMap, body: axum::body::Byte
         "tier": tier.as_str(),
         "fee_bps": fee.map(|f| f.bps).unwrap_or(150),
         "warning": "store this secret in your vault now — it cannot be retrieved again",
+    })))
+}
+
+// ------------------------------------------------------------------ tiers --
+
+#[derive(Deserialize)]
+struct ActivateTierReq {
+    tier: String,
+    network: String,
+    tx_hash: String,
+}
+
+/// What the chain said about a tier-activation payment.
+struct ActivationProof {
+    payer: String,
+    asset: String,
+    qty: String,
+    usd_cents: f64,
+    confirmations: u64,
+}
+
+/// `GET /v1/tiers` — the public tier catalog: which tiers are open to the
+/// whole world, which unlock themselves via on-chain payment, at what price.
+/// Full transparency — the rules are the API.
+async fn list_tiers(State(state): Ctx) -> ApiResult<Response> {
+    guard(&state, "tiers")?;
+    let purchasable = state.config.treasury.is_some();
+    let treasury_note = if purchasable {
+        "treasury configured — autonomous activation enabled"
+    } else {
+        "PAYPHONE_TREASURY_ADDRESS unset — paid tiers require the admin token"
+    };
+    let rows: Vec<Value> = fees::SCHEDULE
+        .iter()
+        .map(|t| {
+            let open = matches!(t.tier, "free" | "starter");
+            let price = state.config.tier_price(t.tier);
+            let issuance = if open {
+                "open"
+            } else if purchasable && price.is_some() {
+                "on-chain payment"
+            } else {
+                "admin token"
+            };
+            json!({
+                "tier": t.tier,
+                "fee_bps": t.bps,
+                "included_volume_usd_cents": t.included_volume_usd_cents,
+                "max_invoices_per_month": if t.max_invoices_per_month == u64::MAX {
+                    json!("unlimited")
+                } else {
+                    json!(t.max_invoices_per_month)
+                },
+                "features": t.features,
+                "issuance": issuance,
+                "price_usd_cents": price,
+            })
+        })
+        .collect();
+    Ok(ok(json!({
+        "tiers": rows,
+        "treasury": state.config.treasury,
+        "rules": {
+            "open_tiers": ["free", "starter"],
+            "how_to_upgrade": "Pay the tier's USD value — any supported asset, any supported EVM network — to the treasury address, then POST /v1/tiers/activate with {tier, network, tx_hash}. The engine verifies the payment on-chain and returns the new key.",
+            "valuation": "stablecoins at parity; other assets at the live oracle rate; the payment must cover the full price",
+            "confirmations": "each network's standard confirmation policy (see /v1/chains)",
+            "single_use": "one tx_hash unlocks one tier exactly once",
+            "fallback": "the admin token still issues any tier (operator override)",
+        },
+        "notes": [
+            treasury_note,
+            "activation proofs are EVM-only in v1 (bitcoin/solana/tron pending)",
+        ],
+    })))
+}
+
+/// Verify the on-chain payment behind a tier activation: the transaction
+/// must be mined, successful, addressed to the treasury (native path) or
+/// carry an ERC-20 `Transfer` to it (token path), carry the network's
+/// standard confirmation depth, and be worth the tier's price at the live
+/// oracle rate. Every failure says exactly what to fix — nobody sane should
+/// have to guess.
+async fn verify_activation_payment(
+    state: &AppState,
+    tier: Tier,
+    network: &str,
+    tx_hash: &str,
+    treasury: &str,
+    price_cents: u64,
+) -> ApiResult<ActivationProof> {
+    let spec = registry::find(network)
+        .ok_or_else(|| AppError::bad_request(format!("unknown network '{network}'")))?;
+    let evm = state
+        .evm
+        .as_ref()
+        .ok_or_else(|| AppError::unavailable("EVM adapter unavailable"))?;
+
+    let (tx, receipt, confirmations) = evm.transaction_with_receipt(network, tx_hash).await?;
+
+    let receipt = receipt.ok_or_else(|| {
+        AppError::bad_request("payment seen but not yet mined — wait a few seconds and retry")
+    })?;
+    let status = crate::chains::evm::parse_hex_quantity(receipt["status"].as_str().unwrap_or("0x1"))
+        .unwrap_or(1);
+    if status != 1 {
+        return Err(AppError::bad_request(
+            "this transaction reverted on-chain — the payment never happened",
+        ));
+    }
+    if confirmations < spec.confirmations {
+        return Err(AppError::bad_request(format!(
+            "payment detected but {confirmations}/{} confirmations — retry in a minute",
+            spec.confirmations
+        )));
+    }
+
+    let treasury_l = treasury.to_lowercase();
+    let native_qty = tx["value"]
+        .as_str()
+        .and_then(crate::chains::evm::parse_hex_quantity)
+        .unwrap_or(0);
+
+    let (asset, qty_base, decimals) = if native_qty > 0 {
+        // Native path: the tx itself moves the chain's coin to the treasury.
+        let to = tx["to"].as_str().map(|s| s.to_lowercase()).unwrap_or_default();
+        if to != treasury_l {
+            return Err(AppError::bad_request(format!(
+                "recipient mismatch — this transaction sends native {} to {to} but the treasury is {treasury_l}",
+                spec.native
+            )));
+        }
+        (spec.native.to_string(), native_qty, 18u8)
+    } else {
+        // Token path: the tx calls a token contract; the payment is the
+        // largest `Transfer` log inside this transaction that lands on the
+        // treasury. Unlisted tokens are named, not guessed at.
+        let logs = receipt["logs"].as_array().cloned().unwrap_or_default();
+        let mut best: Option<(String, u128, u8)> = None;
+        for log in &logs {
+            let Some((qty, _, _)) = crate::chains::evm::decode_transfer(log) else { continue };
+            let topics = log["topics"].as_array().cloned().unwrap_or_default();
+            if topics.len() != 3 {
+                continue;
+            }
+            let Some(to_addr) = crate::chains::evm::topic_to_address(topics[2].as_str().unwrap_or("")) else {
+                continue;
+            };
+            if to_addr != treasury_l {
+                continue;
+            }
+            let token_addr = log["address"].as_str().unwrap_or("");
+            let Some(t) = registry::token_by_address(network, token_addr) else {
+                return Err(AppError::bad_request(format!(
+                    "this transaction pays with an unlisted token contract ({token_addr}) — pay in a listed asset (see /v1/chains)"
+                )));
+            };
+            if best.as_ref().map(|(_, q, _)| qty > *q).unwrap_or(true) {
+                best = Some((t.symbol.to_string(), qty, t.decimals));
+            }
+        }
+        match best {
+            Some(b) => b,
+            None => {
+                return Err(AppError::bad_request(format!(
+                    "no transfer to the treasury ({treasury_l}) found in this transaction — send the payment directly to the treasury address"
+                )))
+            }
+        }
+    };
+
+    let qty = crate::chains::evm::base_units_to_decimal(qty_base, decimals);
+    let qty_f: f64 = qty.parse().unwrap_or(0.0);
+    let rate = state.oracle.rate(&asset).await?;
+    let paid_usd = qty_f * rate.usd;
+    if paid_usd * 100.0 + 0.5 < price_cents as f64 {
+        return Err(AppError::bad_request(format!(
+            "underpaid: this payment is ≈ {paid_usd:.2} USD but the {} tier costs {:.2} USD (received {qty} {asset} on {network})",
+            tier.as_str(),
+            price_cents as f64 / 100.0
+        )));
+    }
+
+    Ok(ActivationProof {
+        payer: tx["from"].as_str().unwrap_or("unknown").to_string(),
+        asset,
+        qty,
+        usd_cents: paid_usd * 100.0,
+        confirmations,
+    })
+}
+
+/// `POST /v1/tiers/activate` — the autonomous, worldwide path to a paid
+/// tier. Pay the tier's USD value to the treasury on-chain (any supported
+/// asset, any EVM network), hand the engine the tx hash, and it verifies
+/// the payment and returns a fresh key at that tier. No admin token, no
+/// human in the loop, no waiting for office hours. The admin token keeps
+/// working as the operator override (see `POST /v1/keys`).
+async fn activate_tier(State(state): Ctx, body: axum::body::Bytes) -> ApiResult<Response> {
+    guard(&state, "tiers")?;
+    let req: ActivateTierReq = parse_body(&body)?;
+    let tier = Tier::parse(&req.tier)?;
+
+    if matches!(tier, Tier::Free | Tier::Starter) {
+        return Err(AppError::bad_request(format!(
+            "'{}' is an open tier — no payment needed: POST /v1/keys with {{\"tier\":\"{}\"}}",
+            tier.as_str(),
+            tier.as_str()
+        )));
+    }
+    let treasury = state.config.treasury.clone().ok_or_else(|| {
+        AppError::unavailable(
+            "this node has no treasury configured (PAYPHONE_TREASURY_ADDRESS) — paid tiers are admin-issued only",
+        )
+    })?;
+    let price_cents = state.config.tier_price(tier.as_str()).ok_or_else(|| {
+        AppError::bad_request(format!("tier '{}' has no activation price", tier.as_str()))
+    })?;
+
+    let network = req.network.trim().to_lowercase();
+    if !state.config.evm_network_available(&network) {
+        return Err(AppError::bad_request(format!(
+            "activation payments run on EVM networks — valid: {}",
+            registry::NETWORKS.iter().map(|n| n.name).collect::<Vec<_>>().join(", ")
+        )));
+    }
+
+    let raw = req.tx_hash.trim().to_lowercase();
+    let tx_hash = if raw.starts_with("0x") { raw } else { format!("0x{raw}") };
+    if tx_hash.len() != 66 || !tx_hash[2..].chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(AppError::bad_request(
+            "tx_hash must be a 32-byte transaction hash (0x + 64 hex characters)",
+        ));
+    }
+    let replay_key = format!("{network}:{tx_hash}");
+    {
+        let mut used = state.tier_used_tx.lock().unwrap();
+        if used.contains(&replay_key) {
+            return Err(AppError::bad_request(
+                "this transaction was already used to activate a tier — one payment unlocks one tier, once",
+            ));
+        }
+        // Reserve through verification; released on failure so honest
+        // retries (pending → mined, typo corrections) still work, while a
+        // concurrent double-submit can never double-issue from one payment.
+        used.insert(replay_key.clone());
+    }
+
+    let proof =
+        match verify_activation_payment(&state, tier, &network, &tx_hash, &treasury, price_cents).await {
+            Ok(p) => p,
+            Err(e) => {
+                state.tier_used_tx.lock().unwrap().remove(&replay_key);
+                return Err(e);
+            }
+        };
+
+    let (pk, sk) = keys::issue_key(&state.config.master_key, tier);
+    let fee_bps = fees::for_tier(tier.as_str()).map(|f| f.bps).unwrap_or(150);
+    Ok(ok_created(json!({
+        "public_key": pk,
+        "secret_key": sk,
+        "tier": tier.as_str(),
+        "fee_bps": fee_bps,
+        "warning": "store this secret in your vault now — it cannot be retrieved again",
+        "activation": {
+            "network": network,
+            "tx_hash": tx_hash,
+            "payer": proof.payer,
+            "asset": proof.asset,
+            "qty": proof.qty,
+            "usd_value_cents": proof.usd_cents as u64,
+            "price_usd_cents": price_cents,
+            "confirmations": proof.confirmations,
+        },
     })))
 }
 
@@ -1319,6 +1609,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/chains", get(list_chains))
         .route("/v1/assets", get(list_assets))
         .route("/v1/keys", post(issue_key))
+        .route("/v1/tiers", get(list_tiers))
+        .route("/v1/tiers/activate", post(activate_tier))
         .route("/v1/invoices", post(create_invoice))
         .route("/v1/invoices/:id", get(get_invoice))
         .route("/v1/rates", get(get_rates))

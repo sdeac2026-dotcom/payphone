@@ -23,10 +23,14 @@ wallets — 7 EVM mainnets + Bitcoin + Solana + Tron.
 
 - **Paying someone?** You need nothing — open the payment link you were sent,
   pay from any wallet, done. No signup, no account, no fees for payers.
-- **Want to accept crypto?** Merchant onboarding is operator-gated to keep
-  scammers off the domain — request access at
-  [lex.ecosystem@gmail.com](mailto:lex.ecosystem@gmail.com) and receive your
-  keys.
+- **Want to accept crypto?** Onboarding is autonomous, worldwide, 24/7:
+  `free` and `starter` tiers self-serve instantly — `POST /v1/keys`, no
+  token, no human. Need more volume? Unlock `growth`/`scale`/`enterprise`
+  by paying the tier's price on-chain to the network treasury (any asset,
+  any supported network) and `POST /v1/tiers/activate` with the tx hash —
+  the engine verifies the payment and issues your key. See
+  `GET /v1/tiers` for the live rules. (Special arrangements:
+  [lex.ecosystem@gmail.com](mailto:lex.ecosystem@gmail.com).)
 - **Just exploring?** Try the [in-browser demo](https://sdeac2026-dotcom.github.io/payphone/)
   (SimNet toy chain, nothing real moves) or deploy your own node below.
 

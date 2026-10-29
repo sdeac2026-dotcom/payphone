@@ -37,7 +37,13 @@ floats are forbidden.
 ### Keys
 | | |
 |---|---|
-| `POST /v1/keys` `{tier}` | Issue a merchant credential. Secret returned **once**. Production: set `PAYPHONE_ADMIN_TOKEN` and send `X-Admin-Token`. |
+| `POST /v1/keys` `{tier}` | Issue a merchant credential. Secret returned **once**. `free` and `starter` are **open** — anyone, worldwide, self-serves with no token. Higher tiers need `X-Admin-Token` (operator override, `PAYPHONE_ADMIN_TOKEN`) **or** an autonomous on-chain activation (next row). |
+
+### Tiers (autonomous onboarding)
+| | |
+|---|---|
+| `GET /v1/tiers` | Public tier catalog: which tiers are `open`, which unlock via `on-chain payment`, at what `price_usd_cents` (env-repriceable: `PAYPHONE_TIER_PRICE_<TIER>_CENTS`; defaults growth $99 / scale $499 / enterprise $1,999), the treasury address, and the activation rules. |
+| `POST /v1/tiers/activate` `{tier, network, tx_hash}` | **The tokenless path to a paid tier.** Pay the tier's USD value to the treasury — any supported asset (stablecoins at parity, others at the live oracle rate) on any supported EVM network — then submit the tx hash. The engine verifies on-chain: mined + successful, recipient is the treasury (native) or carries an ERC-20 `Transfer` to it, the network's standard confirmation depth, and full price coverage. Returns the new key (secret shown once) + a full `activation` receipt. Each `tx_hash` unlocks exactly one tier, once (per-process replay guard). `free`/`starter` need no payment — use `POST /v1/keys`. EVM proofs only in v1. |
 
 ### Invoices
 | | |

@@ -64,6 +64,7 @@ fn static_price(asset: &str) -> Option<f64> {
         "CAKE" => Some(2.2),
         "ARB" => Some(1.1),
         "OP" => Some(2.3),
+        "WLD" => Some(1.5),
         "GMX" => Some(25.0),
         "COMP" => Some(55.0),
         "GRT" => Some(0.25),
@@ -125,6 +126,7 @@ fn coingecko_id(asset: &str) -> Option<&'static str> {
         "OP" => Some("optimism"),
         "GMX" => Some("gmx"),
         "CAKE" => Some("pancakeswap-token"),
+        "WLD" => Some("worldcoin-wld"),
         "WETH" => Some("weth"),
         "WBTC" => Some("wrapped-bitcoin"),
         "cbBTC" => Some("coinbase-wrapped-btc"),
@@ -149,7 +151,7 @@ pub const SUPPORTED_ASSETS: &[&str] = &[
     "DOGE", "ADA", "AVAX", "LINK", "DOT", "TON", "XLM", "HBAR", "BCH", "LTC", "ATOM", "FIL",
     "INJ", "STX", "NEAR", "APT", "SUI", "ICP", "XMR", "ETC", "RENDER",
     "SHIB", "PEPE", "UNI", "AAVE", "LDO", "CRV", "MKR", "COMP", "GRT", "ENS", "MANA", "SAND",
-    "APE", "ARB", "OP", "GMX", "CAKE", "WETH", "WBTC", "cbBTC", "cbETH", "BTCB", "WAVAX",
+    "APE", "ARB", "OP", "GMX", "CAKE", "WLD", "WETH", "WBTC", "cbBTC", "cbETH", "BTCB", "WAVAX",
     "TUSD", "FRAX", "PYUSD", "USDS",
 ];
 

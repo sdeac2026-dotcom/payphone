@@ -219,6 +219,7 @@ mod tests {
             production: false,
             revoked_keys: vec![],
             treasury: None,
+            tier_prices: vec![],
         };
         let (pk, sk) = issue_key("test-master", Tier::Free);
         let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
@@ -256,6 +257,7 @@ mod tests {
             production: true,
             revoked_keys: vec![],
             treasury: None,
+            tier_prices: vec![],
         };
         let (pk, sk) = issue_key("test-master", Tier::Growth);
         let key_id = parse_public_key(&pk).unwrap().key_id;
