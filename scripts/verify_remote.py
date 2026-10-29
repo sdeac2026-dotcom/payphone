@@ -168,6 +168,50 @@ try:
 except Exception as e:
     check("tier activation rejects a bogus proof with a controlled error", False, repr(e))
 
+# 6b. guardian recovery — the zero-knowledge envelope round-trip.
+# Uses the fictional 555-0100 test number and OVERWRITES the same record
+# every run (re-registration is the documented revocation path), so the
+# check leaves exactly one record behind, never growth.
+print("\n[6b] guardian recovery (zero-knowledge envelope round-trip)")
+try:
+    gphone = "+15550100000"
+    gcode = "VERIFY-GUARDIAN-2026"
+    genv = json.dumps({
+        "v": 1, "kind": "mnemonic", "kdf": "PBKDF2-SHA256", "iterations": 310000,
+        "cipher": "AES-GCM-256",
+        "salt": "aa" * 16, "iv": "bb" * 12, "ct": "cc" * 64,
+    })
+    gaddr = "0x" + "ab" * 20
+    code, body = post("/api/v1/wallet/recovery/register",
+                      {"phone": gphone, "address": gaddr, "recovery_code": gcode, "envelope": genv},
+                      timeout=20)
+    check("guardian register accepts an enrollment (201)",
+          code == 201 and (body.get("data") or {}).get("registered") is True,
+          f"code={code} {json.dumps(body)[:160]}")
+except Exception as e:
+    check("guardian register accepts an enrollment (201)", False, repr(e))
+
+try:
+    gcode = "VERIFY-GUARDIAN-2026"
+    code, body = post("/api/v1/wallet/recovery/claim",
+                      {"phone": "+15550100000", "recovery_code": gcode}, timeout=20)
+    data = body.get("data") or {}
+    check("guardian claim returns the envelope + address",
+          code == 200 and data.get("envelope", "").find('"kind": "mnemonic"') >= 0
+          and data.get("address") == "0x" + "ab" * 20,
+          f"code={code} {json.dumps(body)[:160]}")
+except Exception as e:
+    check("guardian claim returns the envelope + address", False, repr(e))
+
+try:
+    code, body = post("/api/v1/wallet/recovery/claim",
+                      {"phone": "+15550100000", "recovery_code": "WRONG-CODE-999"}, timeout=20)
+    msg = (body.get("error") or {}).get("message", "")
+    check("guardian claim with a wrong code -> identical controlled 404",
+          code == 404 and "no recovery record matches" in msg, f"code={code} msg={msg!r}")
+except Exception as e:
+    check("guardian claim with a wrong code -> identical controlled 404", False, repr(e))
+
 # 7. fees
 print("\n[7] fee schedule")
 try:

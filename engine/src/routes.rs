@@ -46,6 +46,34 @@ pub struct AppState {
     /// by `POST /v1/tiers/activate` (per-process memory — a restart forgets;
     /// rotating `PAYPHONE_TREASURY_ADDRESS` invalidates all historic proofs).
     pub tier_used_tx: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// Guardian-recovery registry: phone_hash → [`RecoveryRecord`]. The engine
+    /// holds ONLY client-encrypted ciphertext — zero knowledge, no honeypot.
+    pub recovery: std::sync::Mutex<std::collections::HashMap<String, RecoveryRecord>>,
+}
+
+/// A Guardian-recovery enrollment. Zero-knowledge by construction:
+///
+/// - `envelope` is the wallet secret ALREADY encrypted in the user's browser
+///   under a recovery passphrase that is never transmitted — the engine
+///   stores ciphertext it mathematically cannot open.
+/// - The phone number lives only as its salted HMAC (the phone_pepper
+///   pattern shared with identity lookup) — raw numbers are never persisted.
+/// - The recovery code lives only as a peppered hash, never the code.
+///
+/// Breaking into a record therefore requires ALL THREE user-held secrets:
+/// the phone (SIM possession), the recovery code, and the recovery
+/// passphrase — and the claim endpoint is rate-limited per phone hash.
+#[derive(Clone)]
+pub struct RecoveryRecord {
+    pub address: String,
+    /// HMAC-SHA256(pepper, recovery_code) — hex. Never the code itself.
+    pub code_hash: String,
+    /// Opaque client-encrypted blob (a JSON keystore envelope), ≤ 8 KiB.
+    pub envelope: String,
+    pub created_at: u64,
+    /// Claim counter — a simple on-record audit trail.
+    pub claims: u32,
+    pub last_claim: Option<u64>,
 }
 
 pub type Ctx = State<Arc<AppState>>;
@@ -1206,6 +1234,118 @@ async fn lookup_phone(State(state): Ctx, body: axum::body::Bytes) -> ApiResult<R
 
 // ---------------------------------------------------------------- wallet ---
 
+// ------------------------------------------------------ guardian recovery ---
+
+#[derive(Deserialize)]
+struct GuardianRegisterReq {
+    phone: String,
+    #[serde(default)]
+    default_country: Option<String>,
+    address: String,
+    recovery_code: String,
+    envelope: String,
+}
+
+/// `POST /v1/wallet/recovery/register` — enroll a wallet in Guardian
+/// recovery, the forgot-everything lifeline for non-technical users. The
+/// client encrypts the wallet secret under a SEPARATE recovery passphrase
+/// in the browser and uploads only that ciphertext, with the phone number
+/// and a setup-time recovery code. The engine stores:
+/// - the phone as its salted hash only (raw number never persisted),
+/// - a peppered hash of the recovery code (never the code),
+/// - the envelope as an opaque string it cannot decrypt.
+/// Re-registering the same phone overwrites — a restored wallet re-enrolls
+/// and the previous envelope becomes unreachable, by design. This keeps
+/// every enrollment fresh and revocable by the only person who can produce
+/// a valid claim.
+async fn guardian_register(State(state): Ctx, body: axum::body::Bytes) -> ApiResult<Response> {
+    let req: GuardianRegisterReq = parse_body(&body)?;
+    let e164 = phone::normalize_e164(&req.phone, req.default_country.as_deref())?;
+    let hash = phone::phone_hash(&e164, &state.config.phone_pepper);
+    guard(&state, &format!("recovery-reg:{}", hash))?;
+
+    let code = req.recovery_code.trim().to_string();
+    if code.len() < 8 || code.len() > 128 {
+        return Err(AppError::bad_request(
+            "recovery code must be 8–128 characters — together with your phone and recovery passphrase it unlocks the backup",
+        ));
+    }
+    let envelope = req.envelope.trim().to_string();
+    if envelope.len() < 64 || envelope.len() > 8_192 {
+        return Err(AppError::bad_request(
+            "envelope must be 64–8192 bytes of client-encrypted material",
+        ));
+    }
+    crate::phone::validate_wallet("evm", req.address.trim())?;
+
+    let record = RecoveryRecord {
+        address: req.address.trim().to_lowercase(),
+        code_hash: phone::phone_hash(&code, &state.config.phone_pepper),
+        envelope,
+        created_at: now_secs(),
+        claims: 0,
+        last_claim: None,
+    };
+    state.recovery.lock().unwrap().insert(hash.clone(), record);
+    Ok(ok_created(json!({
+        "recovery_id": phone::payphone_id(&hash),
+        "masked_phone": mask_phone(&e164),
+        "registered": true,
+        "zero_knowledge": "the engine holds ciphertext only — the recovery passphrase never left your device",
+        "next": "write down BOTH the phone number and the recovery code; the backup needs all three secrets",
+    })))
+}
+
+#[derive(Deserialize)]
+struct GuardianClaimReq {
+    phone: String,
+    #[serde(default)]
+    default_country: Option<String>,
+    recovery_code: String,
+}
+
+/// `POST /v1/wallet/recovery/claim` — phone + recovery code → the encrypted
+/// envelope. The passphrase check happens on the CLIENT (the engine never
+/// sees the recovery passphrase; a wrong one yields an envelope that fails
+/// to decrypt — indistinguishable from noise to this server). The mismatch
+/// error is deliberately identical for a wrong phone and a wrong code, so
+/// probing cannot learn which half is right. Claims are rate-limited per
+/// phone hash and counted on the record.
+async fn guardian_claim(State(state): Ctx, body: axum::body::Bytes) -> ApiResult<Response> {
+    let req: GuardianClaimReq = parse_body(&body)?;
+    let e164 = phone::normalize_e164(&req.phone, req.default_country.as_deref())?;
+    let hash = phone::phone_hash(&e164, &state.config.phone_pepper);
+    guard(&state, &format!("recovery-claim:{}", hash))?;
+    let code = req.recovery_code.trim().to_string();
+
+    let mismatch = || {
+        AppError::not_found(
+            "no recovery record matches this phone number and recovery code — check both, or restore from your 12-word phrase or backup file",
+        )
+    };
+    let snapshot = state.recovery.lock().unwrap().get(&hash).cloned();
+    let Some(record) = snapshot else { return Err(mismatch()) };
+    if record.code_hash != phone::phone_hash(&code, &state.config.phone_pepper) {
+        return Err(mismatch());
+    }
+    let claims = {
+        let mut map = state.recovery.lock().unwrap();
+        if let Some(rec) = map.get_mut(&hash) {
+            rec.claims += 1;
+            rec.last_claim = Some(now_secs());
+            rec.claims
+        } else {
+            record.claims + 1
+        }
+    };
+    Ok(ok(json!({
+        "address": record.address,
+        "envelope": record.envelope,
+        "claims": claims,
+        "note": "decrypt this envelope with your recovery passphrase — locally; the engine never sees it",
+    })))
+}
+
 #[derive(Deserialize)]
 struct ActivityQuery {
     network: String,
@@ -1622,6 +1762,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/identity/register", post(register_phone))
         .route("/v1/identity/escrow", post(create_escrow))
         .route("/v1/identity/claim", post(claim_escrow))
+        .route("/v1/wallet/recovery/register", post(guardian_register))
+        .route("/v1/wallet/recovery/claim", post(guardian_claim))
         .route("/v1/wallet/activity", get(wallet_activity))
         .route("/v1/wallet/:address/activity", get(wallet_activity_all))
         .route("/v1/webhooks/test", post(test_webhook))

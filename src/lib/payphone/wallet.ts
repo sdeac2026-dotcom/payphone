@@ -304,11 +304,199 @@ export function walletDestroy(): void {
   unlockedAccount = null;
   localStorage.removeItem(KEYSTORE_KEY);
   localStorage.removeItem(ACTIVITY_KEY);
+  localStorage.removeItem(GUARDIAN_KEY);
 }
 
 function requireAccount(): LocalAccount {
   if (!unlockedAccount) throw new Error("Wallet is locked.");
   return unlockedAccount;
+}
+
+// --------------------------------------------------------------- backup ----
+
+const BACKUP_FORMAT = "payphone-wallet-backup";
+
+/** The file produced by "Download encrypted backup" — safe for cloud drives. */
+export interface BackupFile {
+  format: typeof BACKUP_FORMAT;
+  version: 1;
+  address: string;
+  created_at: number;
+  keystore: Keystore;
+  note: string;
+}
+
+/**
+ * Export the ENCRYPTED keystore as a portable backup file. The secret stays
+ * encrypted (AES-GCM-256 under the user's passphrase) — the file is inert
+ * without that passphrase, so uploading it to Google Drive / iCloud / a USB
+ * stick leaks nothing.
+ */
+export function walletExportBackup(): BackupFile {
+  const ks = keystoreLoad();
+  if (!ks) throw new Error("No wallet found on this device.");
+  return {
+    format: BACKUP_FORMAT,
+    version: 1,
+    address: ks.address,
+    created_at: ks.createdAt,
+    keystore: ks,
+    note:
+      "This file holds your wallet's secret ENCRYPTED with your PayPhone passphrase. " +
+      "Without that passphrase it is useless to anyone. To restore: PayPhone Wallet > " +
+      "Import > 'Restore from backup file'. Your 12-word recovery phrase remains the master key.",
+  };
+}
+
+/**
+ * Restore from a backup file. The passphrase is PROVEN against the file's
+ * ciphertext BEFORE anything is installed — a wrong passphrase changes
+ * nothing on the device.
+ */
+export async function walletRestoreFromBackup(file: unknown, passphrase: string): Promise<string> {
+  const b = file as Partial<BackupFile>;
+  const ks = b?.keystore;
+  if (!b || b.format !== BACKUP_FORMAT || !ks || typeof ks.ct !== "string" || typeof ks.salt !== "string") {
+    throw new Error("That file is not a PayPhone wallet backup.");
+  }
+  const key = await deriveKey(passphrase, fromHex(ks.salt), ks.iterations);
+  try {
+    await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv: fromHex(ks.iv) as BufferSource },
+      key,
+      fromHex(ks.ct) as BufferSource
+    );
+  } catch {
+    throw new Error("Wrong passphrase for this backup file.");
+  }
+  keystoreSave(ks);
+  return ks.address;
+}
+
+// ------------------------------------------------------------- guardian ----
+
+const GUARDIAN_KEY = "payphone.wallet.guardian.v1";
+
+/**
+ * Guardian recovery — the three-key safety net for people who lose things:
+ *
+ *   Key 1: the 12-word phrase (paper — the master key)
+ *   Key 2: the encrypted backup file (cloud — pairs with the passphrase)
+ *   Key 3: the Guardian envelope (the network — pairs with phone + code
+ *          + a separate recovery passphrase)
+ *
+ * The envelope is the wallet secret encrypted IN THIS BROWSER under the
+ * recovery passphrase and uploaded to the engine. The engine stores
+ * ciphertext, a salted phone hash, and a hashed recovery code — it can
+ * never decrypt what it holds, so non-custodial promises stay intact.
+ */
+export interface GuardianEnvelope {
+  v: 1;
+  kind: "mnemonic" | "key";
+  kdf: string;
+  iterations: number;
+  cipher: string;
+  salt: string;
+  iv: string;
+  ct: string;
+}
+
+export interface GuardianStatus {
+  recoveryId: string;
+  address: string;
+  enrolledAt: number;
+}
+
+/** Device-local reminder that the wallet is enrolled (NOT a secret). */
+export function guardianLocalStatus(): GuardianStatus | null {
+  try {
+    const raw = localStorage.getItem(GUARDIAN_KEY);
+    return raw ? (JSON.parse(raw) as GuardianStatus) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Generate the setup-time recovery code (XXXX-XXXX-XXXX, 48 bits of
+ * CSPRNG). Shown exactly once; the user writes it down with their phone.
+ */
+export function guardianGenerateCode(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(6));
+  const hex = Array.from(bytes)
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("")
+    .toUpperCase();
+  return `${hex.slice(0, 4)}-${hex.slice(4, 8)}-${hex.slice(8, 12)}`;
+}
+
+/** Build the encrypted guardian envelope from the wallet's secret. */
+export async function walletGuardianEnvelope(secret: string, recoveryPass: string): Promise<GuardianEnvelope> {
+  const ks = keystoreLoad();
+  if (!ks) throw new Error("No wallet found on this device.");
+  const enc = await encryptSecret(secret, recoveryPass);
+  return { v: 1, kind: ks.kind, ...enc };
+}
+
+/** Enroll: upload the zero-knowledge envelope and record a local reminder. */
+export async function guardianEnroll(
+  phone: string,
+  recoveryCode: string,
+  envelope: GuardianEnvelope
+): Promise<GuardianStatus> {
+  const address = walletAddressStored();
+  if (!address) throw new Error("No wallet found on this device.");
+  const res = await api.guardianRegister({
+    phone,
+    address,
+    recovery_code: recoveryCode,
+    envelope: JSON.stringify(envelope),
+  });
+  const status: GuardianStatus = { recoveryId: res.recovery_id, address, enrolledAt: Date.now() };
+  localStorage.setItem(GUARDIAN_KEY, JSON.stringify(status));
+  return status;
+}
+
+/** Claim the envelope (phone + recovery code). Passphrase stays client-side. */
+export async function guardianClaim(phone: string, code: string): Promise<{ address: string; envelope: GuardianEnvelope }> {
+  const res = await api.guardianClaim({ phone, recovery_code: code });
+  let env: GuardianEnvelope;
+  try {
+    env = JSON.parse(res.envelope) as GuardianEnvelope;
+  } catch {
+    throw new Error("The recovery envelope on record is unreadable. Restore from your 12-word phrase, then re-enroll.");
+  }
+  return { address: res.address, envelope: env };
+}
+
+/** Decrypt a guardian envelope with the recovery passphrase (local only). */
+export async function guardianDecrypt(env: GuardianEnvelope, recoveryPass: string): Promise<string> {
+  const key = await deriveKey(recoveryPass, fromHex(env.salt), env.iterations);
+  try {
+    const pt = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv: fromHex(env.iv) as BufferSource },
+      key,
+      fromHex(env.ct) as BufferSource
+    );
+    return new TextDecoder().decode(pt);
+  } catch {
+    throw new Error("Wrong recovery passphrase — the envelope would not open.");
+  }
+}
+
+/**
+ * Full Guardian restore: claim → decrypt → install as this device's
+ * keystore under a NEW main passphrase. Works from a wiped browser.
+ */
+export async function guardianRestore(
+  phone: string,
+  code: string,
+  recoveryPass: string,
+  newPass: string
+): Promise<string> {
+  const { envelope } = await guardianClaim(phone, code);
+  const secret = await guardianDecrypt(envelope, recoveryPass);
+  return envelope.kind === "key" ? walletImportPrivateKey(secret, newPass) : walletImportMnemonic(secret, newPass);
 }
 
 function clients(c: WalletChain) {

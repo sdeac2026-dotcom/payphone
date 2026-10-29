@@ -256,6 +256,18 @@ where you pay a **phone number**:
   fee is enforced by the wallet UI, not yet by an on-chain contract;
   invoice-path fees ARE engine-enforced (`fee_tx`). Full security model:
   [docs/WALLET.md](docs/WALLET.md).
+- **The safety net — three ways back in.** Built for the people who lose
+  things: (1) the **recovery checkpoint** — the phrase is shown once, then a
+  word-quiz proves it was written down before the wallet opens; (2) the
+  **encrypted backup file** — one click downloads the passphrase-encrypted
+  keystore for Google Drive / iCloud, restorable from the Import tab; (3)
+  **Guardian recovery** — a zero-knowledge envelope on the engine: the secret
+  is re-encrypted in-browser under a separate recovery passphrase and
+  uploaded with the phone number and a setup-time recovery code
+  (`POST /v1/wallet/recovery/register`). A wiped browser restores with
+  phone + code + recovery passphrase (`POST /v1/wallet/recovery/claim`) —
+  the engine stores ciphertext it can never decrypt, so non-custodial stays
+  non-custodial.
 
 ## SimNet — the chain you develop against
 

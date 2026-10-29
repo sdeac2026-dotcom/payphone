@@ -28,15 +28,17 @@ import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 import {
   AlertTriangle, ArrowDownToLine, ArrowRightLeft, CheckCircle2, Copy, Eye, ExternalLink,
-  KeyRound, Loader2, Lock, Plus, RefreshCw, Send, ShieldCheck, Trash2, Wallet as WalletIcon,
+  FileDown, FileUp, KeyRound, LifeBuoy, Loader2, Lock, Phone, Plus, RefreshCw, Send,
+  ShieldCheck, Trash2, Wallet as WalletIcon,
 } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
 import { SendRightNotice } from "./asset-safety";
 import {
-  WALLET_CHAINS, activityLog, explainSendError, feePreview, gasPreview, walletAddress, walletAddressStored,
-  walletBalances, walletCreate, walletDestroy, walletExists,
-  walletImportMnemonic, walletImportPrivateKey, walletIsUnlocked, walletLock,
-  walletRevealSecret, walletSend, resolveRecipient, walletUnlock,
+  WALLET_CHAINS, activityLog, explainSendError, feePreview, gasPreview, guardianEnroll,
+  guardianGenerateCode, guardianLocalStatus, guardianRestore, walletAddress, walletAddressStored,
+  walletBalances, walletCreate, walletDestroy, walletExists, walletExportBackup,
+  walletGuardianEnvelope, walletImportMnemonic, walletImportPrivateKey, walletIsUnlocked, walletLock,
+  walletRestoreFromBackup, walletRevealSecret, walletSend, resolveRecipient, walletUnlock,
   type GasPreview, type Recipient, type SendResult, type TokenBalance, type WalletActivity,
 } from "@/lib/payphone/wallet";
 import { WALLET_SEND_FEE_BPS } from "@/lib/payphone/wallet";
@@ -58,6 +60,28 @@ function fmtFee(q: string): string {
   const n = Number(q);
   if (!Number.isFinite(n) || n === 0) return "0";
   return n < 0.0001 ? n.toFixed(8) : n.toFixed(6);
+}
+
+/** Trigger a browser download of the encrypted keystore backup file. */
+function downloadBackupFile(): string {
+  const b = walletExportBackup();
+  const blob = new Blob([JSON.stringify(b, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `payphone-backup-${b.address.slice(0, 10)}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+  return a.download;
+}
+
+/** Three random word positions (0-indexed) for the recovery checkpoint. */
+function pickQuizIndices(): number[] {
+  const s = new Set<number>();
+  while (s.size < 3) s.add(Math.floor(Math.random() * 12));
+  return [...s].sort((a, b) => a - b);
 }
 
 export function Wallet({ prefill }: { prefill?: WalletPrefill }) {
@@ -83,6 +107,187 @@ export function Wallet({ prefill }: { prefill?: WalletPrefill }) {
   return <WalletMain prefill={prefill} onChanged={refresh} />;
 }
 
+// ------------------------------------------------------------ guardian UI --
+
+/**
+ * Guardian recovery — the restore half. Works from a wiped browser: phone +
+ * recovery code fetch the encrypted envelope from the network; the recovery
+ * passphrase opens it LOCALLY; a fresh device passphrase re-encrypts it.
+ */
+function GuardianRecoverDialog({
+  open,
+  onOpenChange,
+  onRestored,
+}: {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  onRestored: () => void;
+}) {
+  const { toast } = useToast();
+  const [phone, setPhone] = useState("");
+  const [code, setCode] = useState("");
+  const [rpass, setRpass] = useState("");
+  const [npass, setNpass] = useState("");
+  const [npass2, setNpass2] = useState("");
+  const [busy, setBusy] = useState(false);
+  const ready = phone.trim().length >= 8 && code.trim().length >= 8 && rpass.length >= 8 && npass.length >= 8 && npass === npass2;
+
+  async function restore() {
+    setBusy(true);
+    try {
+      const addr = await guardianRestore(phone.trim(), code.trim(), rpass, npass);
+      toast({ title: "Wallet recovered", description: `Welcome back — ${short(addr)}` });
+      onOpenChange(false);
+      onRestored();
+    } catch (e) {
+      toast({ title: "Recovery failed", description: String((e as Error).message ?? e), variant: "destructive" });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2"><LifeBuoy className="h-5 w-5 text-primary" /> Guardian recovery</DialogTitle>
+          <DialogDescription>
+            Your wallet is backed up on the network as an encrypted envelope tied to your phone.
+            All three secrets are checked here, on this device — the network never sees a passphrase.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-3">
+          <div className="space-y-1.5">
+            <Label>Phone number used at enrollment</Label>
+            <Input placeholder="+254 7xx xxx xxx" value={phone} onChange={(e) => setPhone(e.target.value)} />
+          </div>
+          <div className="space-y-1.5">
+            <Label>Recovery code (written down at enrollment)</Label>
+            <Input className="font-mono" placeholder="XXXX-XXXX-XXXX" value={code} onChange={(e) => setCode(e.target.value)} />
+          </div>
+          <div className="space-y-1.5">
+            <Label>Recovery passphrase</Label>
+            <Input type="password" value={rpass} onChange={(e) => setRpass(e.target.value)} />
+          </div>
+          <Separator />
+          <p className="text-xs text-muted-foreground">If the envelope opens, choose the passphrase this browser will use:</p>
+          <div className="grid gap-2 sm:grid-cols-2">
+            <Input type="password" placeholder="new passphrase (min 8)" value={npass} onChange={(e) => setNpass(e.target.value)} />
+            <Input type="password" placeholder="repeat it" value={npass2} onChange={(e) => setNpass2(e.target.value)} />
+          </div>
+          <Button className="w-full" disabled={!ready || busy} onClick={restore}>
+            {busy ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <ShieldCheck className="mr-2 h-4 w-4" />} Recover my wallet
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/**
+ * Guardian recovery — the enroll half. Requires the main passphrase (to
+ * authorize reading the secret), a phone number, a freshly generated
+ * recovery code, and a SEPARATE recovery passphrase. Only ciphertext
+ * leaves this browser.
+ */
+function GuardianEnrollDialog({
+  open,
+  onOpenChange,
+  onEnrolled,
+}: {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  onEnrolled: () => void;
+}) {
+  const { toast } = useToast();
+  const [pass, setPass] = useState("");
+  const [phone, setPhone] = useState("");
+  const [rpass, setRpass] = useState("");
+  const [rpass2, setRpass2] = useState("");
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState(false);
+
+  useEffect(() => {
+    if (open) {
+      setCode(guardianGenerateCode());
+      setDone(false);
+    }
+  }, [open]);
+
+  const ready = pass.length >= 8 && phone.trim().length >= 8 && rpass.length >= 8 && rpass === rpass2;
+
+  async function enroll() {
+    setBusy(true);
+    try {
+      const secret = await walletRevealSecret(pass);
+      const env = await walletGuardianEnvelope(secret, rpass);
+      await guardianEnroll(phone.trim(), code, env);
+      setDone(true);
+      onEnrolled();
+    } catch (e) {
+      toast({ title: "Guardian setup failed", description: String((e as Error).message ?? e), variant: "destructive" });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2"><LifeBuoy className="h-5 w-5 text-primary" /> Guardian recovery</DialogTitle>
+          <DialogDescription>
+            A zero-knowledge backup on the PayPhone network: if this browser is ever wiped, your phone + recovery
+            code + recovery passphrase bring the wallet back — on any device. The network stores only ciphertext.
+          </DialogDescription>
+        </DialogHeader>
+        {done ? (
+          <div className="space-y-3">
+            <p className="flex items-center gap-2 rounded-md bg-emerald-500/10 p-3 text-sm text-emerald-700 dark:text-emerald-400">
+              <CheckCircle2 className="h-4 w-4 shrink-0" /> Enrolled. The network can now rescue this wallet.
+            </p>
+            <div className="space-y-1.5">
+              <Label>Write your recovery code down — with your phone number — right now</Label>
+              <div className="rounded-md border bg-muted/40 p-3 text-center font-mono text-lg tracking-widest">{code}</div>
+              <p className="text-xs text-muted-foreground">
+                Recovery needs ALL THREE: this phone number, this code, and your recovery passphrase.
+                Paper first, phrase always — the Guardian envelope is the safety net, not the replacement.
+              </p>
+            </div>
+            <Button className="w-full" onClick={() => onOpenChange(false)}>Done</Button>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            <div className="space-y-1.5">
+              <Label>Wallet passphrase (authorizes reading the secret)</Label>
+              <Input type="password" value={pass} onChange={(e) => setPass(e.target.value)} />
+            </div>
+            <div className="space-y-1.5">
+              <Label>Phone number for recovery</Label>
+              <Input placeholder="+254 7xx xxx xxx" value={phone} onChange={(e) => setPhone(e.target.value)} />
+            </div>
+            <div className="grid gap-2 sm:grid-cols-2">
+              <div className="space-y-1.5">
+                <Label>Recovery passphrase (separate from the wallet one)</Label>
+                <Input type="password" value={rpass} onChange={(e) => setRpass(e.target.value)} />
+              </div>
+              <div className="space-y-1.5">
+                <Label>Repeat it</Label>
+                <Input type="password" value={rpass2} onChange={(e) => setRpass2(e.target.value)} />
+              </div>
+            </div>
+            <p className="text-xs text-muted-foreground">Your recovery code is ready: <span className="font-mono">{code}</span> — it is shown again after setup, with instructions.</p>
+            <Button className="w-full" disabled={!ready || busy} onClick={enroll}>
+              {busy ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <ShieldCheck className="mr-2 h-4 w-4" />} Encrypt &amp; enroll
+            </Button>
+          </div>
+        )}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 // ------------------------------------------------------------- onboarding --
 
 function Onboarding({ onDone }: { onDone: () => void }) {
@@ -92,8 +297,12 @@ function Onboarding({ onDone }: { onDone: () => void }) {
   const [pass2, setPass2] = useState("");
   const [mnemonic, setMnemonic] = useState<string | null>(null);
   const [confirmed, setConfirmed] = useState(false);
+  const [showWords, setShowWords] = useState(true);
+  const [quiz, setQuiz] = useState<{ indices: number[]; values: string[]; passed: boolean } | null>(null);
   const [importWords, setImportWords] = useState("");
   const [importKey, setImportKey] = useState("");
+  const [backupFile, setBackupFile] = useState<File | null>(null);
+  const [guardianOpen, setGuardianOpen] = useState(false);
   const [busy, setBusy] = useState(false);
 
   const passOk = pass.length >= 8 && pass === pass2;
@@ -113,6 +322,48 @@ function Onboarding({ onDone }: { onDone: () => void }) {
   async function finishCreate() {
     onDone();
     toast({ title: "Wallet created", description: "Encrypted locally. Only you hold the keys." });
+  }
+
+  function startQuiz() {
+    setShowWords(false);
+    setQuiz({ indices: pickQuizIndices(), values: ["", "", ""], passed: false });
+  }
+
+  function checkQuiz() {
+    if (!quiz || !mnemonic) return;
+    const words = mnemonic.split(" ");
+    const okAll = quiz.indices.every((idx, k) => (quiz.values[k] ?? "").trim().toLowerCase() === words[idx].toLowerCase());
+    if (okAll) {
+      setQuiz({ ...quiz, passed: true });
+    } else {
+      setQuiz({ indices: pickQuizIndices(), values: ["", "", ""], passed: false });
+      toast({
+        title: "Not quite — the words didn't match",
+        description: "Show the words, compare what you wrote, and try the check again. Getting this right is what makes the wallet recoverable.",
+        variant: "destructive",
+      });
+    }
+  }
+
+  async function doRestoreBackup() {
+    if (!backupFile) return;
+    setBusy(true);
+    try {
+      const parsed = JSON.parse(await backupFile.text());
+      const addr = await walletRestoreFromBackup(parsed, pass);
+      toast({ title: "Wallet restored from backup", description: addr });
+      onDone();
+    } catch (e) {
+      toast({ title: "Restore failed", description: String((e as Error).message ?? e), variant: "destructive" });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function doImport() {
+    if (backupFile) return doRestoreBackup();
+    if (importWords) return doImportMnemonic();
+    return doImportKey();
   }
 
   async function doImportMnemonic() {
@@ -153,16 +404,69 @@ function Onboarding({ onDone }: { onDone: () => void }) {
             We encrypt them with your passphrase in this browser — we cannot show them again, cannot
             reset them, and never send them anywhere. Anyone with these words controls the funds.
           </p>
-          <div className="grid grid-cols-3 gap-2 rounded-lg border bg-muted/40 p-4 font-mono text-sm">
-            {mnemonic.split(" ").map((w, i) => (
-              <span key={i}><span className="mr-1 text-muted-foreground">{i + 1}.</span>{w}</span>
-            ))}
-          </div>
-          <label className="flex items-center gap-2 text-sm">
-            <input type="checkbox" checked={confirmed} onChange={(e) => setConfirmed(e.target.checked)} />
-            I wrote the 12 words down and stored them somewhere safe (paper, offline).
-          </label>
-          <Button className="w-full" disabled={!confirmed} onClick={finishCreate}>
+          {showWords && !quiz?.passed && (
+            <div className="grid grid-cols-3 gap-2 rounded-lg border bg-muted/40 p-4 font-mono text-sm">
+              {mnemonic.split(" ").map((w, i) => (
+                <span key={i}><span className="mr-1 text-muted-foreground">{i + 1}.</span>{w}</span>
+              ))}
+            </div>
+          )}
+          {quiz?.passed ? (
+            <p className="flex items-center gap-2 rounded-md bg-emerald-500/10 p-3 text-sm text-emerald-700 dark:text-emerald-400">
+              <CheckCircle2 className="h-4 w-4 shrink-0" /> Backup verified — you proved the words are written down correctly.
+            </p>
+          ) : quiz ? (
+            <div className="space-y-3 rounded-lg border p-4">
+              <p className="text-sm">Prove it — type the words at these positions (the phrase is hidden while you type):</p>
+              {quiz.indices.map((idx, k) => (
+                <div key={idx} className="flex items-center gap-2">
+                  <span className="w-16 text-sm text-muted-foreground">Word #{idx + 1}</span>
+                  <Input
+                    className="font-mono"
+                    value={quiz.values[k] ?? ""}
+                    onChange={(e) => {
+                      const values = [...quiz.values];
+                      values[k] = e.target.value;
+                      setQuiz({ ...quiz, values });
+                    }}
+                  />
+                </div>
+              ))}
+              <div className="flex flex-wrap gap-2">
+                <Button size="sm" onClick={checkQuiz} disabled={quiz.values.some((v) => !v.trim())}>
+                  <CheckCircle2 className="mr-1.5 h-4 w-4" /> Check my words
+                </Button>
+                <Button size="sm" variant="ghost" onClick={() => setShowWords(true)}>Show the words again</Button>
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <label className="flex items-center gap-2 text-sm">
+                <input type="checkbox" checked={confirmed} onChange={(e) => setConfirmed(e.target.checked)} />
+                I wrote the 12 words down and stored them somewhere safe (paper, offline).
+              </label>
+              <div className="flex flex-wrap gap-2">
+                <Button disabled={!confirmed} onClick={startQuiz}>
+                  <CheckCircle2 className="mr-2 h-4 w-4" /> Verify my backup
+                </Button>
+                <Button
+                  variant="outline"
+                  onClick={() => {
+                    try {
+                      const name = downloadBackupFile();
+                      toast({ title: "Encrypted backup saved", description: `${name} — put it in your cloud drive (Google Drive / iCloud). It is useless without your passphrase.` });
+                    } catch (e) {
+                      toast({ title: "Backup failed", description: String((e as Error).message ?? e), variant: "destructive" });
+                    }
+                  }}
+                >
+                  <FileDown className="mr-2 h-4 w-4" /> Also save an encrypted backup file
+                </Button>
+              </div>
+              <p className="text-xs text-muted-foreground">The backup file is encrypted with your passphrase — safe to upload to Google Drive or iCloud.</p>
+            </div>
+          )}
+          <Button className="w-full" disabled={!quiz?.passed} onClick={finishCreate}>
             <CheckCircle2 className="mr-2 h-4 w-4" /> I&apos;m done — open my wallet
           </Button>
         </CardContent>
@@ -195,14 +499,25 @@ function Onboarding({ onDone }: { onDone: () => void }) {
             <TabsContent value="import" className="space-y-4 pt-4">
               <div className="space-y-2">
                 <Label>Recovery phrase (12–24 words) — or a private key below</Label>
-                <Textarea className="font-mono text-sm" placeholder="word1 word2 word3 …" value={importWords} onChange={(e) => { setImportWords(e.target.value); setImportKey(""); }} />
+                <Textarea className="font-mono text-sm" placeholder="word1 word2 word3 …" value={importWords} onChange={(e) => { setImportWords(e.target.value); setImportKey(""); setBackupFile(null); }} />
                 <Label className="pt-2">…or private key (0x…)</Label>
-                <Input type="password" placeholder="0x…" value={importKey} onChange={(e) => { setImportKey(e.target.value); setImportWords(""); }} />
-                <p className="text-xs text-muted-foreground">Imports are MetaMask-compatible (m/44&apos;/60&apos;/0&apos;/0/0) — the same seed yields the same addresses.</p>
+                <Input type="password" placeholder="0x…" value={importKey} onChange={(e) => { setImportKey(e.target.value); setImportWords(""); setBackupFile(null); }} />
+                <Label className="pt-2">…or restore from an encrypted backup file</Label>
+                <Input
+                  type="file"
+                  accept="application/json,.json"
+                  onChange={(e) => {
+                    setBackupFile(e.target.files?.[0] ?? null);
+                    setImportWords("");
+                    setImportKey("");
+                  }}
+                />
+                <p className="text-xs text-muted-foreground">Imports are MetaMask-compatible (m/44&apos;/60&apos;/0&apos;/0/0) — the same seed yields the same addresses. A backup file restores with the passphrase that encrypted it.</p>
               </div>
-              <Button className="w-full" disabled={!passOk || busy || (!importWords && !importKey)}
-                onClick={importWords ? doImportMnemonic : doImportKey}>
-                <KeyRound className="mr-2 h-4 w-4" /> Import wallet
+              <Button className="w-full" disabled={!passOk || busy || (!importWords && !importKey && !backupFile)}
+                onClick={doImport}>
+                {backupFile ? <FileUp className="mr-2 h-4 w-4" /> : <KeyRound className="mr-2 h-4 w-4" />}
+                {backupFile ? "Restore from backup file" : "Import wallet"}
               </Button>
             </TabsContent>
           </Tabs>
@@ -221,8 +536,12 @@ function Onboarding({ onDone }: { onDone: () => void }) {
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
             If you forget this passphrase and lose the recovery phrase, your funds are unrecoverable — by design, by anyone.
           </p>
+          <Button variant="ghost" className="w-full" onClick={() => setGuardianOpen(true)}>
+            <LifeBuoy className="mr-2 h-4 w-4" /> Wiped this browser? Restore with your phone (Guardian recovery)
+          </Button>
         </CardContent>
       </Card>
+      <GuardianRecoverDialog open={guardianOpen} onOpenChange={setGuardianOpen} onRestored={onDone} />
     </div>
   );
 }
@@ -233,6 +552,7 @@ function Unlock({ onUnlock, onLockedReset }: { onUnlock: () => void; onLockedRes
   const { toast } = useToast();
   const [pass, setPass] = useState("");
   const [busy, setBusy] = useState(false);
+  const [guardianOpen, setGuardianOpen] = useState(false);
   const stored = walletAddressStored();
 
   async function unlock() {
@@ -266,7 +586,11 @@ function Unlock({ onUnlock, onLockedReset }: { onUnlock: () => void; onLockedRes
         }}>
           <Trash2 className="mr-2 h-4 w-4" /> Remove keystore from this browser
         </Button>
+        <Button variant="ghost" className="w-full" onClick={() => setGuardianOpen(true)}>
+          <LifeBuoy className="mr-2 h-4 w-4" /> Lost this browser's data? Recover with your phone
+        </Button>
       </CardContent>
+      <GuardianRecoverDialog open={guardianOpen} onOpenChange={setGuardianOpen} onRestored={onUnlock} />
     </Card>
   );
 }
@@ -292,6 +616,8 @@ function WalletMain({ prefill, onChanged }: { prefill?: WalletPrefill; onChanged
   const [radarErr, setRadarErr] = useState<string | null>(null);
   const [reveal, setReveal] = useState<string | null>(null);
   const [revealPass, setRevealPass] = useState("");
+  const [guardianOpen, setGuardianOpen] = useState(false);
+  const guardian = guardianLocalStatus();
 
   const tokens = useMemo(() => balances ?? [], [balances]);
 
@@ -713,6 +1039,19 @@ function WalletMain({ prefill, onChanged }: { prefill?: WalletPrefill; onChanged
         <CardHeader><CardTitle className="text-base">Security</CardTitle></CardHeader>
         <CardContent className="flex flex-wrap gap-2">
           <Button variant="outline" size="sm" onClick={() => setReveal("")}><Eye className="mr-1.5 h-3.5 w-3.5" /> Reveal recovery phrase / key</Button>
+          <Button variant="outline" size="sm" onClick={() => setGuardianOpen(true)}>
+            <LifeBuoy className="mr-1.5 h-3.5 w-3.5" /> Guardian recovery{guardian ? " · enrolled" : ""}
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => {
+            try {
+              const name = downloadBackupFile();
+              toast({ title: "Encrypted backup saved", description: `${name} — put it in your cloud drive (Google Drive / iCloud). It is useless without your passphrase.` });
+            } catch (e) {
+              toast({ title: "Backup failed", description: String((e as Error).message ?? e), variant: "destructive" });
+            }
+          }}>
+            <FileDown className="mr-1.5 h-3.5 w-3.5" /> Backup file
+          </Button>
           <Button variant="outline" size="sm" className="text-destructive hover:text-destructive" onClick={() => {
             if (confirm("Remove the keystore from this browser? Your funds remain on-chain; only the recovery phrase can restore access.")) { walletDestroy(); onChanged(); }
           }}>
@@ -723,6 +1062,11 @@ function WalletMain({ prefill, onChanged }: { prefill?: WalletPrefill; onChanged
             Encrypted with PBKDF2-SHA256 (310k rounds) + AES-GCM-256, stored only in this browser. The passphrase
             and recovery phrase never leave your device. We cannot recover either for you.
           </p>
+          {guardian && (
+            <p className="w-full text-xs text-emerald-600 dark:text-emerald-400">
+              Guardian recovery enrolled {new Date(guardian.enrolledAt).toLocaleDateString()} — phone + recovery code + recovery passphrase restore this wallet on any device. The network holds only ciphertext.
+            </p>
+          )}
         </CardContent>
       </Card>
 
@@ -746,6 +1090,9 @@ function WalletMain({ prefill, onChanged }: { prefill?: WalletPrefill; onChanged
           )}
         </DialogContent>
       </Dialog>
+
+      {/* guardian enroll dialog */}
+      <GuardianEnrollDialog open={guardianOpen} onOpenChange={setGuardianOpen} onEnrolled={onChanged} />
     </div>
   );
 }

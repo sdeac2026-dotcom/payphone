@@ -91,6 +91,7 @@ async fn main() {
         started: Instant::now(),
         chain_probe: std::sync::Mutex::new(std::collections::HashMap::new()),
         tier_used_tx: std::sync::Mutex::new(std::collections::HashSet::new()),
+        recovery: std::sync::Mutex::new(std::collections::HashMap::new()),
     });
 
     // ---- CORS --------------------------------------------------------------

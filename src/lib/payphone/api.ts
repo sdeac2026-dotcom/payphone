@@ -329,6 +329,32 @@ export const api = {
       wallet: string | null;
     }>("POST", "/identity/lookup", { phone }),
 
+  // ------------------------------------------------------------ guardian ----
+
+  /**
+   * Enroll a wallet in Guardian recovery. The client uploads ONLY a
+   * zero-knowledge envelope (the secret encrypted under the recovery
+   * passphrase, in-browser) plus the phone number and setup code. The
+   * engine stores ciphertext it can never open.
+   */
+  guardianRegister: (payload: { phone: string; address: string; recovery_code: string; envelope: string }) =>
+    request<{ recovery_id: string; masked_phone: string; registered: boolean }>(
+      "POST",
+      "/wallet/recovery/register",
+      payload
+    ),
+
+  /**
+   * Claim a guardian envelope with phone + recovery code (public, strictly
+   * rate-limited per phone). The passphrase check happens client-side.
+   */
+  guardianClaim: (payload: { phone: string; recovery_code: string }) =>
+    request<{ address: string; envelope: string; claims: number }>(
+      "POST",
+      "/wallet/recovery/claim",
+      payload
+    ),
+
   registerPhone: (phone: string, wallet: string, creds: { pk: string; sk: string }) =>
     request<{ payphone_id: string; wallet: string; tx: { height: number; hash: string } }>(
       "POST",
