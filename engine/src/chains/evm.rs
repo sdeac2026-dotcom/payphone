@@ -530,6 +530,7 @@ impl EvmAdapter {
         let block = tx["blockNumber"]
             .as_str()
             .and_then(parse_hex_quantity)
+            .map(|q| q as u64)
             .unwrap_or(0);
         let tip = self.block_number(network).await?;
         Ok((tx, receipt, tip.saturating_sub(block)))
