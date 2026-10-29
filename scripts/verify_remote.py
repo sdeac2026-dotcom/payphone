@@ -174,8 +174,64 @@ try:
     code, raw = get("/api/v1/fees/schedule", timeout=20)
     body = json.loads(raw).get("data", {})
     check("fee schedule public", bool(body), json.dumps(body)[:200])
+    check("fee schedule carries the treasury field (null until operator sets it)",
+          "treasury" in body, json.dumps(body)[:200])
 except Exception as e:
     check("fee schedule public", False, repr(e))
+
+# 8. wallet money-radar (WLD on OP Mainnet + incoming feed)
+print("\n[8] wallet money-radar (WLD on OP Mainnet + incoming feed)")
+try:
+    code, raw = get("/api/v1/chains", timeout=30)
+    nets = json.loads(raw).get("data", {}).get("networks", [])
+    op = next((n for n in nets if n.get("name") == "optimism"), {})
+    toks = {t.get("symbol") for t in op.get("settleable_tokens", [])}
+    check("WLD settleable on optimism (exchange withdrawals arrive)", "WLD" in toks,
+          f"tokens={sorted(toks)[:12]}")
+except Exception as e:
+    check("WLD settleable on optimism (exchange withdrawals arrive)", False, repr(e))
+
+try:
+    probe = "0x000000000000000000000000000000000000dEaD"
+    code, raw = get(f"/api/v1/wallet/activity?network=optimism&address={probe}&blocks=100", timeout=45)
+    body = json.loads(raw).get("data", {})
+    ok = isinstance(body.get("incoming", []), list) and "native_balance" in body
+    check("wallet activity feed live (incoming rows + native balance + conf policy)",
+          ok and code == 200, f"code={code} {json.dumps(body)[:160]}")
+except Exception as e:
+    check("wallet activity feed live (incoming rows + native balance + conf policy)", False, repr(e))
+
+# 9. full-visibility activity scan (all networks, both directions)
+print("\n[9] full-visibility activity scan (all networks, both directions)")
+try:
+    probe = "0x000000000000000000000000000000000000dEaD"
+    code, raw = get(f"/api/v1/wallet/{probe}/activity?blocks=30&direction=both", timeout=60)
+    body = json.loads(raw).get("data", {})
+    nets = body.get("scanned_networks", [])
+    check("multi-network scan live (all 8 EVM networks in one call)",
+          code == 200 and len(nets) >= 8, f"code={code} scanned={nets}")
+    check("scan payload well-formed (transfers + native + notes)",
+          isinstance(body.get("transfers"), list) and isinstance(body.get("native_balances"), list)
+          and isinstance(body.get("notes"), list), json.dumps(body)[:200])
+    check("native balances reported per network",
+          all(("network" in nb and "asset" in nb and "qty" in nb) for nb in body.get("native_balances", [])),
+          json.dumps(body.get("native_balances"))[:200])
+    code2, raw2 = get(f"/api/v1/wallet/{probe}/activity?blocks=30&direction=in", timeout=60)
+    body2 = json.loads(raw2).get("data", {})
+    check("direction + network filters honored",
+          all(t.get("direction") == "in" for t in body2.get("transfers", [])),
+          f"filter=in transfers={len(body2.get('transfers', []))}")
+except Exception as e:
+    check("full-visibility scan endpoint", False, repr(e))
+
+try:
+    code, body = get("/api/v1/wallet/notanaddress/activity?blocks=10", timeout=30)
+    msg = (json.loads(body).get("error") or {}).get("message", "")
+    check("bad address rejected", code == 400, f"code={code} msg={msg!r}")
+except urllib.error.HTTPError as e:
+    check("bad address rejected", e.code == 400, f"code={e.code}")
+except Exception as e:
+    check("bad address rejected", False, repr(e))
 
 print()
 print(f"RESULT: {len(passed)} passed, {len(failed)} failed")
