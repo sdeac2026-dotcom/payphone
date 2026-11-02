@@ -23,8 +23,8 @@ def check(name, cond, detail=""):
     (passed if cond else failed).append(name)
     print(("  PASS " if cond else "  FAIL ") + name + (f"  [{detail}]" if detail and not cond else ""))
 
-def get(path, timeout=20):
-    req = urllib.request.Request(BASE + path, headers={"Accept": "application/json"})
+def get(path, timeout=20, headers=None):
+    req = urllib.request.Request(BASE + path, headers={"Accept": "application/json", **(headers or {})})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.status, r.read()
 
@@ -315,23 +315,27 @@ cid = conn.get("client_id", "")
 csec = conn.get("client_secret", "")
 
 if cid and csec:
+    # Route config uses REPLACE semantics (the full table is the routing
+    # truth) — so the wildcard default route is re-sent alongside the new
+    # per-asset route, exactly as the dashboard's route editor does.
+    pyusd_and_default = {"routes": [
+        {"asset": "*", "chain": "evm", "network": "", "wallet": "0x" + "11" * 20},
+        {"asset": "PYUSD", "chain": "evm", "network": "ethereum", "wallet": "0x" + "22" * 20},
+    ]}
     try:
-        code, body = post(f"/api/v1/connectors/{cid}/config",
-                          {"routes": [{"asset": "PYUSD", "chain": "evm", "network": "ethereum",
-                                       "wallet": "0x" + "22" * 20}]},
+        code, body = post(f"/api/v1/connectors/{cid}/config", pyusd_and_default,
                           headers=conn_headers(cid, "cs_wrong"), timeout=20)
         check("connector config with a WRONG secret -> 401", code == 401, f"code={code}")
     except Exception as e:
         check("connector config with a WRONG secret -> 401", False, repr(e))
 
     try:
-        code, body = post(f"/api/v1/connectors/{cid}/config",
-                          {"routes": [{"asset": "PYUSD", "chain": "evm", "network": "ethereum",
-                                       "wallet": "0x" + "22" * 20}]},
+        code, body = post(f"/api/v1/connectors/{cid}/config", pyusd_and_default,
                           headers=conn_headers(cid, csec), timeout=20)
         routes = (body.get("data") or {}).get("routes", [])
         check("connector config with the right secret sets routes (PYUSD -> ethereum)",
-              code == 200 and any(r.get("asset") == "PYUSD" for r in routes),
+              code == 200 and any(r.get("asset") == "PYUSD" for r in routes)
+              and any(r.get("asset") == "*" for r in routes),
               f"code={code} routes={routes}")
     except Exception as e:
         check("connector config with the right secret sets routes (PYUSD -> ethereum)", False, repr(e))
@@ -363,7 +367,8 @@ if cid and csec:
     pid = payment.get("payment_id", "")
     if pid:
         try:
-            code, raw = get(f"/api/v1/connect/payments/{pid}", timeout=60)
+            code, raw = get(f"/api/v1/connect/payments/{pid}", timeout=60,
+                            headers=conn_headers(cid, csec))
             p = (json.loads(raw).get("data") or {}).get("payment", {})
             check("connect payment status observed live (payment.status present)",
                   code == 200 and p.get("payment_id") == pid
@@ -375,7 +380,7 @@ if cid and csec:
             check("connect payment status observed live (payment.status present)", False, repr(e))
 
     try:
-        code, raw = get("/api/v1/connect/payments", timeout=20)
+        code, raw = get("/api/v1/connect/payments", timeout=20, headers=conn_headers(cid, csec))
         data = json.loads(raw).get("data") or {}
         check("connector payment log lists minted payments",
               code == 200 and (data.get("count") or 0) >= 1,
