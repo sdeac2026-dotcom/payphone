@@ -15,10 +15,45 @@ import type { NextConfig } from "next";
  */
 const isStaticExport = process.env.PAYPHONE_STATIC_EXPORT === "1";
 
+/**
+ * Baseline security headers on every console route. CSP stays pragmatic:
+ * Next.js hydration requires inline bootstrap scripts, so script-src keeps
+ * 'unsafe-inline' — the load-bearing protections here are frame-ancestors
+ * (clickjacking), nosniff, referrer hygiene and HSTS. Note: headers() only
+ * applies to the server build; the static GitHub-Pages demo build serves
+ * plain files and relies on Pages' own headers.
+ */
+const securityHeaders = [
+  { key: "Strict-Transport-Security", value: "max-age=63072000; includeSubDomains" },
+  { key: "X-Content-Type-Options", value: "nosniff" },
+  { key: "X-Frame-Options", value: "DENY" },
+  { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
+  { key: "Permissions-Policy", value: "camera=(), microphone=(), geolocation=()" },
+  {
+    key: "Content-Security-Policy",
+    value: [
+      "default-src 'self'",
+      "script-src 'self' 'unsafe-inline'",
+      "style-src 'self' 'unsafe-inline'",
+      "img-src 'self' data: blob:",
+      "connect-src 'self'",
+      "font-src 'self' data:",
+      "object-src 'none'",
+      "base-uri 'self'",
+      "form-action 'self'",
+      "frame-ancestors 'none'",
+    ].join("; "),
+  },
+];
+
 const nextConfig: NextConfig = {
   output: isStaticExport ? "export" : "standalone",
   basePath: process.env.PAYPHONE_BASE_PATH || undefined,
   images: isStaticExport ? { unoptimized: true } : undefined,
+  async headers() {
+    if (isStaticExport) return [];
+    return [{ source: "/:path*", headers: securityHeaders }];
+  },
   typescript: {
     ignoreBuildErrors: true,
   },

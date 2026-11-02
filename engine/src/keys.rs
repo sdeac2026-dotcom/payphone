@@ -182,9 +182,35 @@ pub fn compute_event_signature(signing_key: &str, timestamp: u64, payload: &str)
     hex::encode(mac.finalize().into_bytes())
 }
 
+/// String equality without data-dependent branching (length differences
+/// short-circuit — lengths are not secret: HMAC-SHA256 hex is always 64).
+pub fn constant_time_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn constant_time_eq_matches_only_equal_strings() {
+        assert!(constant_time_eq("abc", "abc"));
+        assert!(constant_time_eq("", ""));
+        assert!(!constant_time_eq("abc", "abd"));
+        assert!(!constant_time_eq("abc", "abcd"));
+        assert!(!constant_time_eq("abcd", "abc"));
+        assert!(!constant_time_eq("", "x"));
+        // 64-char hex pairs (the real usage).
+        let h1 = "91ed9cc0ba558267197a485257590837e838f684390335dc89056f9fd0c0ccac";
+        let mut h2 = h1.to_string();
+        h2.replace_range(63..64, "d");
+        assert!(constant_time_eq(h1, h1));
+        assert!(!constant_time_eq(h1, &h2));
+    }
 
     #[test]
     fn key_roundtrip() {

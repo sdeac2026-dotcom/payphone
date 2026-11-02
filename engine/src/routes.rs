@@ -886,6 +886,11 @@ async fn get_invoice(
         observed_qty: observation.observed_qty,
         seconds_left: inv.seconds_left(now),
     };
+    // Token holders (payers) can read the invoice — the merchant's webhook
+    // endpoint is the merchant's business, not the payer's. (The token itself
+    // embeds it; stripping it here removes the free API-level read.)
+    let mut with_status = with_status;
+    with_status.invoice.whu = String::new();
     Ok(ok(json!({
         "invoice": with_status,
         "fee": fee_breakdown(&inv),
@@ -1622,7 +1627,7 @@ async fn test_webhook(
     let ts = now_secs();
     let body_str = serde_json::to_string(&payload).unwrap();
     let sig = keys::compute_event_signature(&state.config.signing_key, ts, &body_str);
-    let delivery = webhooks::deliver(&req.url, &state.config.signing_key, &event, &payload).await;
+    let delivery = webhooks::deliver(&state.config, &req.url, &event, &payload).await;
 
     Ok(ok(json!({
         "event": event,
@@ -1649,16 +1654,29 @@ struct VerifyWebhookReq {
 }
 
 /// `POST /v1/webhooks/verify` — teach-by-doing endpoint: verify a signature
-/// exactly the way the SDKs do.
+/// exactly the way the SDKs do. SECURITY: the engine verifies the CALLER's
+/// secret and returns only the verdict. It must NEVER sign caller-chosen
+/// payloads with the engine's own signing key — that key also authenticates
+/// invoice access tokens, so a "helpful" expected_signature here would be a
+/// public signature oracle (forge any invoice token, read any invoice,
+/// deliver fake paid events).
 async fn verify_webhook(State(state): Ctx, body: axum::body::Bytes) -> ApiResult<Response> {
+    let _ = &state;
     guard(&state, "verify")?;
     let req: VerifyWebhookReq = parse_body(&body)?;
-    let ts: u64 = req.timestamp.parse().map_err(|_| AppError::bad_request("timestamp must be unix seconds"))?;
-    let expected = keys::compute_event_signature(&state.config.signing_key, ts, &req.payload);
-    let valid = expected == req.signature.trim().to_lowercase();
+    if req.secret.trim().is_empty() {
+        return Err(AppError::bad_request(
+            "secret is required — this endpoint verifies YOUR webhook secret; the engine never signs payloads with its own key",
+        ));
+    }
+    let ts: u64 = req
+        .timestamp
+        .parse()
+        .map_err(|_| AppError::bad_request("timestamp must be unix seconds"))?;
+    let expected = keys::compute_event_signature(req.secret.trim(), ts, &req.payload);
+    let valid = keys::constant_time_eq(&expected, req.signature.trim().to_lowercase().as_str());
     Ok(ok(json!({
         "valid": valid,
-        "expected_signature": expected,
         "algorithm": "hex(HMAC_SHA256(secret, \"{timestamp}.{payload}\"))",
     })))
 }
