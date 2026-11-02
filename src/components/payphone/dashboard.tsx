@@ -13,6 +13,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -20,7 +21,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 import {
   Activity as ActivityIcon, ArrowDownLeft, ArrowUpRight, Blocks, Cable, Copy, CreditCard, ExternalLink, Eye, EyeOff,
-  Fingerprint, Globe, KeyRound, Link2, Phone, Plus, RefreshCw, RotateCw, Send, ShieldCheck,
+  Fingerprint, Globe, Info, KeyRound, Landmark, Link2, Phone, Plus, RefreshCw, RotateCw, Send, ShieldCheck,
   Trash2, TrendingUp, Webhook, Zap,
 } from "lucide-react";
 import {
@@ -154,6 +155,7 @@ export function Dashboard({ onOpenCheckout }: { onOpenCheckout: (id: string, tok
           <TabsTrigger value="identity" className="gap-1.5"><Fingerprint className="h-3.5 w-3.5" /> Phone identity</TabsTrigger>
           <TabsTrigger value="webhooks" className="gap-1.5"><Webhook className="h-3.5 w-3.5" /> Webhooks</TabsTrigger>
           <TabsTrigger value="connectors" className="gap-1.5"><Cable className="h-3.5 w-3.5" /> Connectors</TabsTrigger>
+          <TabsTrigger value="paypal" className="gap-1.5"><CreditCard className="h-3.5 w-3.5" /> PayPal</TabsTrigger>
           <TabsTrigger value="keys" className="gap-1.5"><KeyRound className="h-3.5 w-3.5" /> API keys</TabsTrigger>
           <TabsTrigger value="explorer" className="gap-1.5"><Blocks className="h-3.5 w-3.5" /> SimNet explorer</TabsTrigger>
         </TabsList>
@@ -164,6 +166,7 @@ export function Dashboard({ onOpenCheckout }: { onOpenCheckout: (id: string, tok
         <TabsContent value="identity"><Identity merchant={merchant} /></TabsContent>
         <TabsContent value="webhooks"><Webhooks merchant={merchant} /></TabsContent>
         <TabsContent value="connectors"><Connectors merchant={merchant} /></TabsContent>
+        <TabsContent value="paypal"><PayPalTab merchant={merchant} /></TabsContent>
         <TabsContent value="keys"><Keys merchant={merchant} /></TabsContent>
         <TabsContent value="explorer"><Explorer /></TabsContent>
       </Tabs>
@@ -1217,6 +1220,13 @@ const DEMO_BUILD = process.env.NEXT_PUBLIC_PAYPHONE_DEMO === "1";
 
 type RouteDraft = { asset: string; network: string; wallet: string };
 
+/**
+ * Sentinel for the network select's "Auto" option — Radix Select forbids an
+ * empty-string SelectItem value (it crashes the whole client on render), so
+ * "auto" maps back to "" (engine default venue) when the payload is built.
+ */
+const AUTO_NETWORK = "auto";
+
 function connectorSnippet(base: string, conn: StoredConnector): string {
   return `curl -X POST ${base}/api/v1/connect/payments \\
   -H "X-PayPhone-Client: ${conn.client_id}" \\
@@ -1404,10 +1414,13 @@ function Connectors({ merchant }: { merchant: MerchantSession }) {
                         ))}
                       </SelectContent>
                     </Select>
-                    <Select value={d.network} onValueChange={(v) => setDraft(i, { network: v })}>
+                    <Select
+                      value={d.network || AUTO_NETWORK}
+                      onValueChange={(v) => setDraft(i, { network: v === AUTO_NETWORK ? "" : v })}
+                    >
                       <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="">Auto — {entry?.default_network ?? "default venue"}</SelectItem>
+                        <SelectItem value={AUTO_NETWORK}>Auto — {entry?.default_network ?? "default venue"}</SelectItem>
                         {(entry?.settleable_networks ?? []).map((s) => (
                           <SelectItem key={`${s.chain}/${s.network}`} value={`${s.chain}/${s.network}`}>
                             {s.chain === "evm" ? s.network : `${s.chain}/${s.network}`}
@@ -1524,8 +1537,10 @@ function Connectors({ merchant }: { merchant: MerchantSession }) {
               <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
                 PYUSD is PayPal&apos;s own stablecoin, live on Ethereum and Arbitrum. Eligible PayPal users can
                 withdraw PYUSD to any 0x… address — add a PYUSD route above and PayPal money lands in your wallet
-                like any other crypto. Other PayPal balances can only be off-ramped by PayPal itself (no third
-                party can pull from them — that&apos;s a PayPal policy, not a PayPhone limit).
+                like any other crypto. Own the PayPal account? The <strong>PayPal tab</strong> verifies your
+                Client ID/Secret live against PayPal and walks the USD → PYUSD → wallet bridge with your
+                destination address pre-filled. Other PayPal balances can only be off-ramped by PayPal itself
+                (no third party can pull from them — that&apos;s a PayPal policy, not a PayPhone limit).
               </p>
             </div>
             <div>
@@ -1635,6 +1650,278 @@ function ConnectorPayments({ conn }: { conn: StoredConnector | null }) {
         )}
       </CardContent>
     </Card>
+  );
+}
+
+// ------------------------------------------------------------------ paypal ----
+
+/**
+ * PayPal bridge — the owner's OWN PayPal account, connected and verified
+ * live. PayPal's REST API cannot be driven from the browser (CORS), so the
+ * engine performs the verification call: credentials go through one TLS
+ * request and are discarded — the engine never stores them.
+ *
+ * The honest pipeline this tab walks:
+ *   PayPal USD balance → buy PYUSD in the PayPal app → send PYUSD on-chain
+ *   to YOUR destination address → the engine observes the transfer like any
+ *   other asset payment (paid at network depth, webhook fires) → the wallet
+ *   is free to spend/swap/send it anywhere.
+ */
+
+const LS_PAYPAL = "payphone.paypal.v1";
+type PayPalEnv = "sandbox" | "live";
+
+function PayPalTab({ merchant }: { merchant: MerchantSession }) {
+  const [env, setEnv] = useState<PayPalEnv>("sandbox");
+  const [clientId, setClientId] = useState("");
+  const [clientSecret, setClientSecret] = useState("");
+  const [remember, setRemember] = useState(false);
+  const [verifying, setVerifying] = useState(false);
+  const [status, setStatus] = useState<{ app_id: string | null; scopes: string[]; environment: string } | null>(null);
+  const [balances, setBalances] = useState<{ currency: string; total: string; primary: boolean }[] | null>(null);
+  const [balanceAsOf, setBalanceAsOf] = useState<string | null>(null);
+  const [balanceBusy, setBalanceBusy] = useState(false);
+  const [balanceError, setBalanceError] = useState<string | null>(null);
+  const [dest, setDest] = useState(walletAddressStored() ?? merchant.wallet);
+  const { toast } = useToast();
+
+  // Restored ONLY if the user opted into remembering on this device.
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(LS_PAYPAL);
+      if (!raw) return;
+      const c = JSON.parse(raw) as { client_id?: string; client_secret?: string; environment?: PayPalEnv };
+      if (c.client_id && c.client_secret) {
+        setClientId(c.client_id);
+        setClientSecret(c.client_secret);
+        setEnv(c.environment ?? "sandbox");
+        setRemember(true);
+      }
+    } catch {
+      /* no remembered credentials */
+    }
+  }, []);
+
+  function persistChoice() {
+    try {
+      if (remember && clientId.trim() && clientSecret.trim()) {
+        localStorage.setItem(LS_PAYPAL, JSON.stringify({ client_id: clientId.trim(), client_secret: clientSecret.trim(), environment: env }));
+      } else {
+        localStorage.removeItem(LS_PAYPAL);
+      }
+    } catch {
+      /* storage unavailable */
+    }
+  }
+
+  async function verify() {
+    if (!clientId.trim() || !clientSecret.trim()) {
+      toast({ title: "Enter both credentials", description: "Client ID and Secret from developer.paypal.com → Apps & Credentials.", variant: "destructive" });
+      return;
+    }
+    setVerifying(true);
+    setStatus(null);
+    setBalances(null);
+    try {
+      const r = await api.paypalVerify({ client_id: clientId.trim(), client_secret: clientSecret.trim(), environment: env });
+      setStatus({ app_id: r.app_id, scopes: r.scopes, environment: r.environment });
+      persistChoice();
+      toast({ title: "PayPal credentials verified", description: `app ${r.app_id ?? "?"} · ${r.environment}` });
+    } catch (e) {
+      toast({ title: "PayPal said no", description: e instanceof Error ? e.message : "unknown error", variant: "destructive" });
+    } finally {
+      setVerifying(false);
+    }
+  }
+
+  async function loadBalance() {
+    if (!clientId.trim() || !clientSecret.trim()) return;
+    setBalanceBusy(true);
+    setBalanceError(null);
+    try {
+      const r = await api.paypalBalance({ client_id: clientId.trim(), client_secret: clientSecret.trim(), environment: env });
+      setBalances(r.balances);
+      setBalanceAsOf(r.as_of_time);
+    } catch (e) {
+      setBalanceError(e instanceof Error ? e.message : "unknown error");
+    } finally {
+      setBalanceBusy(false);
+    }
+  }
+
+  return (
+    <div className="grid gap-4 lg:grid-cols-2">
+      {/* ---------------------------------------------------- connect card */}
+      <Card className="self-start">
+        <CardHeader className="pb-3">
+          <CardTitle className="flex items-center gap-2 text-base">
+            <Landmark className="h-4 w-4 text-primary" /> Connect PayPal
+          </CardTitle>
+          <p className="text-sm text-muted-foreground">
+            Your own PayPal account, verified live. Get free keys at{" "}
+            <a className="text-primary underline underline-offset-2" href="https://developer.paypal.com/dashboard/applications" target="_blank" rel="noreferrer">
+              developer.paypal.com → Apps &amp; Credentials <ExternalLink className="inline h-3 w-3" />
+            </a>{" "}
+            — create an app, copy the Client ID and Secret. Use <strong>sandbox</strong> first (free test
+            accounts), <strong>live</strong> for real money.
+          </p>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="space-y-2">
+            <Label>Environment</Label>
+            <Select value={env} onValueChange={(v) => setEnv(v as PayPalEnv)}>
+              <SelectTrigger className="h-9 text-sm"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="sandbox">Sandbox — free test credentials</SelectItem>
+                <SelectItem value="live">Live — real PayPal account</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="pp-id">Client ID</Label>
+            <Input id="pp-id" placeholder="AeA1QIZXi…" value={clientId} onChange={(e) => setClientId(e.target.value)} className="font-mono text-xs" autoComplete="off" />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="pp-secret">Secret</Label>
+            <Input id="pp-secret" type="password" placeholder="EGnHDxD_qRPd…" value={clientSecret} onChange={(e) => setClientSecret(e.target.value)} className="font-mono text-xs" autoComplete="off" />
+          </div>
+          <div className="flex items-start gap-2">
+            <Checkbox id="pp-remember" checked={remember} onCheckedChange={(v) => setRemember(v === true)} className="mt-0.5" />
+            <Label htmlFor="pp-remember" className="text-xs font-normal text-muted-foreground">
+              Remember on this device (stored in this browser only — the engine never keeps PayPal
+              credentials; each check passes them through one encrypted call and discards them)
+            </Label>
+          </div>
+          <Button className="w-full gap-2" onClick={verify} disabled={verifying}>
+            {verifying ? <RefreshCw className="h-4 w-4 animate-spin" /> : <ShieldCheck className="h-4 w-4" />}
+            {verifying ? "Verifying with PayPal…" : "Verify credentials live"}
+          </Button>
+
+          {status && (
+            <div className="space-y-1.5 rounded-lg border border-primary/40 bg-primary/5 p-3 text-sm">
+              <div className="font-medium text-primary">Connected — PayPal answered</div>
+              <div className="flex flex-wrap items-center gap-2">
+                <MonoValue value={status.app_id ?? "—"} display={`app_id ${status.app_id ?? "—"}`} />
+                <Badge variant="outline" className="text-[10px]">{status.environment}</Badge>
+              </div>
+              {status.scopes.length > 0 && (
+                <p className="text-xs text-muted-foreground">
+                  {status.scopes.length} granted scope{status.scopes.length === 1 ? "" : "s"} — {status.scopes.slice(0, 3).map((s) => s.split("/").pop()).filter(Boolean).join(", ")}
+                  {status.scopes.length > 3 ? "…" : ""}
+                </p>
+              )}
+              <Button size="sm" variant="outline" className="h-7 gap-1 text-xs" onClick={loadBalance} disabled={balanceBusy}>
+                {balanceBusy ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Landmark className="h-3 w-3" />}
+                Read USD balance
+              </Button>
+              {balances && (
+                <div className="pt-1">
+                  {balances.length === 0 ? (
+                    <p className="text-xs text-muted-foreground">No balances reported for this account yet.</p>
+                  ) : (
+                    <div className="flex flex-wrap gap-2">
+                      {balances.map((b, i) => (
+                        <Badge key={i} variant="secondary" className="text-xs">
+                          {b.currency} {usd(Math.round(parseFloat(b.total || "0") * 100))}
+                        </Badge>
+                      ))}
+                    </div>
+                  )}
+                  {balanceAsOf && <p className="mt-1 text-[10px] text-muted-foreground">as of {new Date(balanceAsOf).toLocaleString()}</p>}
+                </div>
+              )}
+              {balanceError && (
+                <p className="text-xs text-muted-foreground">{balanceError}</p>
+              )}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* ----------------------------------------------------- right side */}
+      <div className="space-y-4">
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base">PayPal dollars → PYUSD → your wallet</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3 text-sm">
+            <div className="space-y-2">
+              <Label htmlFor="pp-dest">Destination address for PYUSD on-chain</Label>
+              <div className="flex gap-2">
+                <Input id="pp-dest" value={dest} onChange={(e) => setDest(e.target.value)} className="font-mono text-xs" placeholder="0x… (Ethereum or Arbitrum)" />
+              </div>
+              <p className="text-[11px] text-muted-foreground">
+                Your PayPhone wallet address works — PYUSD settles on Ethereum and Arbitrum. Add an explicit
+                PYUSD route in the <strong>Connectors</strong> tab so arriving PayPal money auto-routes here.
+              </p>
+            </div>
+            <ol className="space-y-2.5">
+              {[
+                {
+                  t: "Buy PYUSD with your USD balance",
+                  d: "In the PayPal app: Finances → Crypto (or Buy) → PYUSD → Buy. Your USD balance converts to PYUSD at the rate PayPal shows you.",
+                },
+                {
+                  t: "Send PYUSD to the destination address",
+                  d: "PayPal → PYUSD → Send → paste the address above. Double-check the first and last characters — on-chain sends are irreversible.",
+                },
+                {
+                  t: "PayPhone confirms it on-chain",
+                  d: "The engine watches PYUSD on Ethereum/Arbitrum. When the transfer reaches network depth the payment flips to paid and your webhooks fire — no manual claiming.",
+                },
+                {
+                  t: "Put it to work",
+                  d: "The wallet can now spend it: send to any phone number (Phone-ID) or address, swap into USDC/ETH on a DEX, or pay utilities and services that accept stablecoins.",
+                },
+              ].map((s, i) => (
+                <li key={i} className="flex gap-2.5">
+                  <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-primary/15 text-[11px] font-semibold text-primary">{i + 1}</span>
+                  <div>
+                    <div className="font-medium">{s.t}</div>
+                    <p className="text-xs leading-relaxed text-muted-foreground">{s.d}</p>
+                  </div>
+                </li>
+              ))}
+            </ol>
+            {dest.trim() && <MonoValue value={dest.trim()} display={`destination ${shortHash(dest.trim(), 12)}`} />}
+            <p className="flex items-start gap-2 rounded-lg border bg-muted/30 p-2.5 text-[11px] leading-relaxed text-muted-foreground">
+              <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              Buying and external-sending PYUSD are PayPal in-app actions gated by PayPal (region and account
+              status) — no API exists for a third party to move your PayPal balance, which is exactly why this
+              tab verifies YOUR keys and guides YOUR app steps instead of pretending otherwise.
+            </p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base">Which keys do what — no confusion</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-2.5 text-sm">
+            <div className="rounded-lg border bg-background/40 p-2.5">
+              <div className="flex items-center gap-2 font-medium"><Cable className="h-3.5 w-3.5 text-primary" /> PayPhone connector keys (cn_ / cs_)</div>
+              <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                Created in the <strong>Connectors</strong> tab. Give these to PLATFORMS so they can pay you —
+                they can only mint payment requests to your wallets, nothing else.
+              </p>
+            </div>
+            <div className="rounded-lg border bg-background/40 p-2.5">
+              <div className="flex items-center gap-2 font-medium"><Landmark className="h-3.5 w-3.5 text-primary" /> PayPal keys (Client ID / Secret)</div>
+              <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                From PayPal, for YOUR OWN account. Never share them with anyone — this tab uses them only to
+                verify and read balances. Whoever holds them can act on your PayPal app.
+              </p>
+            </div>
+            <div className="rounded-lg border bg-background/40 p-2.5">
+              <div className="flex items-center gap-2 font-medium"><ArrowDownLeft className="h-3.5 w-3.5 text-primary" /> Payers need neither</div>
+              <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                Anyone paying you just opens the payment link — no PayPhone account, no PayPal account, no keys.
+              </p>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+    </div>
   );
 }
 

@@ -589,6 +589,34 @@ export const api = {
       null,
       connectorHeaders(clientId, clientSecret)
     ),
+
+  // --------------------------------------------------------------- paypal ---
+
+  /**
+   * PayPal bridge — verify the user's OWN PayPal REST credentials live
+   * (client-credentials grant against api-m.paypal.com | sandbox). The
+   * engine passes the credentials through one TLS call and discards them.
+   */
+  paypalVerify: (input: { client_id: string; client_secret: string; environment: string }) =>
+    request<{
+      connected: boolean;
+      environment: string;
+      app_id: string | null;
+      token_type: string;
+      expires_in: number | null;
+      scopes: string[];
+      credentials_stored: false;
+      note: string;
+    }>("POST", "/paypal/verify", input),
+
+  /** Read-only USD balance look — needs PayPal's balances-reporting permission. */
+  paypalBalance: (input: { client_id: string; client_secret: string; environment: string }) =>
+    request<{
+      environment: string;
+      balances: { currency: string; total: string; primary: boolean }[];
+      as_of_time: string | null;
+      last_refresh_time: string | null;
+    }>("POST", "/paypal/balance", input),
 };
 
 /** Connector credential headers (plain auth — platforms hold ID + secret). */

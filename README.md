@@ -39,7 +39,8 @@ wallets — 7 EVM mainnets + Bitcoin + Solana + Tron.
   into the wallet you picked for it (USDC → Base, ETH → Ethereum,
   PYUSD → Ethereum…), address-to-address on-chain, never custodied.
   Create yours in the dashboard's **Connectors** tab or `POST
-  /v1/connectors`.
+  /v1/connectors`. Own a PayPal account too? The **PayPal** tab verifies
+  your REST keys live and walks the USD → PYUSD → your-wallet bridge.
 - **Just exploring?** Try the [in-browser demo](https://sdeac2026-dotcom.github.io/payphone/)
   (SimNet toy chain, nothing real moves) or deploy your own node below.
 

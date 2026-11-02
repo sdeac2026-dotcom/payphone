@@ -64,6 +64,14 @@ floats are forbidden.
 
 Connector trust model: the secret is verify-only (keyed HMAC at rest, constant-time compare), the route table is the single source of routing truth (only the secret holder can change where money lands), and records are per-process memory — a restart forgets connectors and owners re-create them (documented v1 trade-off; persistence is the first R&D follow-up).
 
+### PayPal bridge (the owner's own PayPal account)
+| | |
+|---|---|
+| `POST /v1/paypal/verify` `{client_id, client_secret, environment?}` | Verify the caller's OWN PayPal REST credentials LIVE: performs the client-credentials grant against `https://api-m.sandbox.paypal.com` (default) or `https://api-m.paypal.com` (`environment: "live"`). Returns PayPal's own `app_id`, token type/expiry and the granted scope list — proof the keys work, without storing them. Credentials are pass-through: one TLS call, then discarded (never persisted, never logged, never echoed). Errors pass through PayPal's own reason (`invalid_client` → 401 with guidance). Open endpoint, one shared rate-limit budget. |
+| `POST /v1/paypal/balance` `{client_id, client_secret, environment?}` | Read-only USD balance via PayPal's reporting API. Needs the PayPal app/account to have balances-reporting permission; when PayPal refuses, the error says so honestly and notes the USD→PYUSD bridge doesn't require it. |
+
+The USD → PYUSD → wallet bridge these power: PayPal USD balance → buy PYUSD in the PayPal app → send PYUSD on-chain to the destination wallet (Ethereum/Arbitrum) → the engine observes it like any asset payment (paid at network depth, webhook fires). Console: the dashboard's **PayPal** tab walks all steps with the destination pre-filled.
+
 ### Rates & conversion
 | | |
 |---|---|

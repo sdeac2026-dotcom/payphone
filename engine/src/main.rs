@@ -18,6 +18,7 @@ mod fees;
 mod invoice;
 mod keys;
 mod oracle;
+mod paypal;
 mod phone;
 mod ratelimit;
 mod routes;

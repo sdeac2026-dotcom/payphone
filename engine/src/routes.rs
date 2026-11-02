@@ -1792,6 +1792,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/simnet/balance/:address", get(simnet_balance))
         // Connectors — the universal payment receiver (own module).
         .merge(crate::connectors::router())
+        // PayPal bridge — verify the owner's own PayPal REST credentials.
+        .merge(crate::paypal::router())
         .fallback(not_found)
         .with_state(state)
 }

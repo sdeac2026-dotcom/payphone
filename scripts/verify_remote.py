@@ -393,6 +393,41 @@ else:
     check("connector credentials obtained (auth/mint checks skipped)", False,
           "connector creation failed — see the earlier connector check")
 
+# 11. paypal bridge — the owner's own PayPal credentials, verified LIVE.
+#     Garbage credentials must produce PayPal's OWN rejection passed through
+#     as a controlled 401 (proves real egress to api-m.sandbox.paypal.com and
+#     honest error mapping). Local validation errors stay 400.
+print("\n[11] paypal bridge (live credential verification)")
+try:
+    code, body = post("/api/v1/paypal/verify",
+                      {"client_id": "", "client_secret": "", "environment": "sandbox"}, timeout=20)
+    msg = (body.get("error") or {}).get("message", "")
+    check("paypal verify without credentials -> controlled 400",
+          code == 400 and "client_id" in msg, f"code={code} msg={msg!r}")
+except Exception as e:
+    check("paypal verify without credentials -> controlled 400", False, repr(e))
+
+try:
+    code, body = post("/api/v1/paypal/verify",
+                      {"client_id": "AeA1QIZXi_verify_remote", "client_secret": "EGnHDxD_verify_remote",
+                       "environment": "sandbox"}, timeout=40)
+    etype = (body.get("error") or {}).get("type", "")
+    msg = (body.get("error") or {}).get("message", "")
+    check("garbage PayPal credentials -> PayPal's own rejection passed through (401 paypal_rejected)",
+          code == 401 and etype == "paypal_rejected" and "invalid_client" in msg,
+          f"code={code} type={etype} msg={msg!r}")
+except Exception as e:
+    check("garbage PayPal credentials -> PayPal's own rejection passed through (401 paypal_rejected)", False, repr(e))
+
+try:
+    code, body = post("/api/v1/paypal/verify",
+                      {"client_id": "x", "client_secret": "y", "environment": "staging"}, timeout=20)
+    check("unknown environment -> controlled 400",
+          code == 400 and "sandbox" in (body.get("error") or {}).get("message", "").lower(),
+          f"code={code} {json.dumps(body)[:140]}")
+except Exception as e:
+    check("unknown environment -> controlled 400", False, repr(e))
+
 print()
 print(f"RESULT: {len(passed)} passed, {len(failed)} failed")
 if failed:
