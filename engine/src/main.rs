@@ -12,6 +12,7 @@
 
 mod chains;
 mod config;
+mod connectors;
 mod error;
 mod fees;
 mod invoice;
@@ -92,6 +93,7 @@ async fn main() {
         chain_probe: std::sync::Mutex::new(std::collections::HashMap::new()),
         tier_used_tx: std::sync::Mutex::new(std::collections::HashSet::new()),
         recovery: std::sync::Mutex::new(std::collections::HashMap::new()),
+        connectors: std::sync::Mutex::new(std::collections::HashMap::new()),
     });
 
     // ---- CORS --------------------------------------------------------------
@@ -102,6 +104,8 @@ async fn main() {
             axum::http::header::HeaderName::from_static("x-payphone-key"),
             axum::http::header::HeaderName::from_static("x-payphone-timestamp"),
             axum::http::header::HeaderName::from_static("x-payphone-signature"),
+            axum::http::header::HeaderName::from_static("x-payphone-client"),
+            axum::http::header::HeaderName::from_static("x-payphone-secret"),
             axum::http::header::HeaderName::from_static("x-admin-token"),
         ])
         .max_age(Duration::from_secs(3600));

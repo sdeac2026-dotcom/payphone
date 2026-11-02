@@ -12,6 +12,7 @@ Proves, without any secrets:
   6. Asset catalog loaded (60 assets)
   7. Admin gate ACTIVE: key issuance without X-Admin-Token -> 403
   8. Fee schedule public and sane
+  9. Connectors: universal receiver end-to-end (create -> auth -> mint -> status)
 """
 import json, sys, time, urllib.error, urllib.request
 
@@ -276,6 +277,116 @@ except urllib.error.HTTPError as e:
     check("bad address rejected", e.code == 400, f"code={e.code}")
 except Exception as e:
     check("bad address rejected", False, repr(e))
+
+# 10. connectors — the universal payment receiver:
+#     create -> wrong-secret rejection -> route config -> mint -> status.
+#     Leaves one connector + one payment request behind (bounded by the
+#     engine's per-connector payment log cap).
+print("\n[10] connectors (universal payment receiver)")
+
+def conn_headers(cid, secret):
+    return {"X-PayPhone-Client": cid, "X-PayPhone-Secret": secret}
+
+conn = {}
+try:
+    code, body = post("/api/v1/connectors", {}, timeout=20)
+    msg = (body.get("error") or {}).get("message", "")
+    check("connector with no destination -> controlled 400",
+          code == 400 and ("destination" in msg.lower() or "route" in msg.lower()),
+          f"code={code} msg={msg!r}")
+except Exception as e:
+    check("connector with no destination -> controlled 400", False, repr(e))
+
+try:
+    code, body = post("/api/v1/connectors",
+                      {"label": "verify-remote", "default_wallet": "0x" + "11" * 20},
+                      timeout=20)
+    conn = body.get("data") or {}
+    ok = (code == 201
+          and str(conn.get("client_id", "")).startswith("cn_")
+          and str(conn.get("client_secret", "")).startswith("cs_")
+          and bool(conn.get("routes")))
+    check("connector self-serves with a default wallet (201, cn_/cs_ shown once)",
+          ok, f"code={code} {json.dumps(body)[:200]}")
+except Exception as e:
+    check("connector self-serves with a default wallet (201, cn_/cs_ shown once)", False, repr(e))
+
+cid = conn.get("client_id", "")
+csec = conn.get("client_secret", "")
+
+if cid and csec:
+    try:
+        code, body = post(f"/api/v1/connectors/{cid}/config",
+                          {"routes": [{"asset": "PYUSD", "chain": "evm", "network": "ethereum",
+                                       "wallet": "0x" + "22" * 20}]},
+                          headers=conn_headers(cid, "cs_wrong"), timeout=20)
+        check("connector config with a WRONG secret -> 401", code == 401, f"code={code}")
+    except Exception as e:
+        check("connector config with a WRONG secret -> 401", False, repr(e))
+
+    try:
+        code, body = post(f"/api/v1/connectors/{cid}/config",
+                          {"routes": [{"asset": "PYUSD", "chain": "evm", "network": "ethereum",
+                                       "wallet": "0x" + "22" * 20}]},
+                          headers=conn_headers(cid, csec), timeout=20)
+        routes = (body.get("data") or {}).get("routes", [])
+        check("connector config with the right secret sets routes (PYUSD -> ethereum)",
+              code == 200 and any(r.get("asset") == "PYUSD" for r in routes),
+              f"code={code} routes={routes}")
+    except Exception as e:
+        check("connector config with the right secret sets routes (PYUSD -> ethereum)", False, repr(e))
+
+    try:
+        code, body = post("/api/v1/connect/payments",
+                          {"asset": "USDC", "amount_usd_cents": 2500, "reference": "verify-remote"},
+                          headers=conn_headers(cid, "cs_wrong"), timeout=30)
+        check("connect payment with a WRONG secret -> 401", code == 401, f"code={code}")
+    except Exception as e:
+        check("connect payment with a WRONG secret -> 401", False, repr(e))
+
+    payment = {}
+    try:
+        code, body = post("/api/v1/connect/payments",
+                          {"asset": "USDC", "amount_usd_cents": 2500, "reference": "verify-remote"},
+                          headers=conn_headers(cid, csec), timeout=60)
+        payment = body.get("data") or {}
+        ok = (code == 201
+              and str(payment.get("destination_wallet", "")).startswith("0x")
+              and str(payment.get("payment_url", "")).startswith("http")
+              and bool(payment.get("asset_amount"))
+              and payment.get("status") == "awaiting_payment")
+        check("universal receiver mints a payment (201, destination + payment_url + asset_amount)",
+              ok, f"code={code} {json.dumps(body)[:240]}")
+    except Exception as e:
+        check("universal receiver mints a payment (201, destination + payment_url + asset_amount)", False, repr(e))
+
+    pid = payment.get("payment_id", "")
+    if pid:
+        try:
+            code, raw = get(f"/api/v1/connect/payments/{pid}", timeout=60)
+            p = (json.loads(raw).get("data") or {}).get("payment", {})
+            check("connect payment status observed live (payment.status present)",
+                  code == 200 and p.get("payment_id") == pid
+                  and p.get("status") in ("pending", "paid", "underpaid", "expired"),
+                  f"code={code} {json.dumps(p)[:200]}")
+        except urllib.error.HTTPError as e:
+            check("connect payment status observed live (payment.status present)", False, f"code={e.code}")
+        except Exception as e:
+            check("connect payment status observed live (payment.status present)", False, repr(e))
+
+    try:
+        code, raw = get("/api/v1/connect/payments", timeout=20)
+        data = json.loads(raw).get("data") or {}
+        check("connector payment log lists minted payments",
+              code == 200 and (data.get("count") or 0) >= 1,
+              f"code={code} count={data.get('count')}")
+    except urllib.error.HTTPError as e:
+        check("connector payment log lists minted payments", False, f"code={e.code}")
+    except Exception as e:
+        check("connector payment log lists minted payments", False, repr(e))
+else:
+    check("connector credentials obtained (auth/mint checks skipped)", False,
+          "connector creation failed — see the earlier connector check")
 
 print()
 print(f"RESULT: {len(passed)} passed, {len(failed)} failed")

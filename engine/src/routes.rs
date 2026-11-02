@@ -49,6 +49,10 @@ pub struct AppState {
     /// Guardian-recovery registry: phone_hash → [`RecoveryRecord`]. The engine
     /// holds ONLY client-encrypted ciphertext — zero knowledge, no honeypot.
     pub recovery: std::sync::Mutex<std::collections::HashMap<String, RecoveryRecord>>,
+    /// Connector registry: client_id → [`crate::connectors::ConnectorRecord`]
+    /// (the universal receiver). Secrets are stored only as master-keyed
+    /// HMACs; per-process memory like `recovery`.
+    pub connectors: std::sync::Mutex<std::collections::HashMap<String, crate::connectors::ConnectorRecord>>,
 }
 
 /// A Guardian-recovery enrollment. Zero-knowledge by construction:
@@ -91,16 +95,16 @@ fn rand_hex(n_bytes: usize) -> String {
     hex::encode(buf)
 }
 
-fn ok(data: Value) -> Response {
+pub(crate) fn ok(data: Value) -> Response {
     (StatusCode::OK, Json(json!({ "data": data }))).into_response()
 }
 
-fn ok_created(data: Value) -> Response {
+pub(crate) fn ok_created(data: Value) -> Response {
     (StatusCode::CREATED, Json(json!({ "data": data }))).into_response()
 }
 
 /// Enforce the per-key rate limit.
-fn guard(state: &AppState, key: &str) -> ApiResult<()> {
+pub(crate) fn guard(state: &AppState, key: &str) -> ApiResult<()> {
     if state.limiter.check(key) {
         Ok(())
     } else {
@@ -129,7 +133,7 @@ fn require_auth(
 }
 
 /// Parse a JSON body with a friendly error.
-fn parse_body<T: for<'de> Deserialize<'de>>(raw: &[u8]) -> ApiResult<T> {
+pub(crate) fn parse_body<T: for<'de> Deserialize<'de>>(raw: &[u8]) -> ApiResult<T> {
     serde_json::from_slice(raw).map_err(|e| AppError::bad_request(format!("invalid JSON body: {e}")))
 }
 
@@ -503,34 +507,34 @@ async fn activate_tier(State(state): Ctx, body: axum::body::Bytes) -> ApiResult<
 // --------------------------------------------------------------- invoices --
 
 #[derive(Deserialize)]
-struct CreateInvoiceReq {
+pub(crate) struct CreateInvoiceReq {
     /// Amount in USD cents (integer minor units — floats are forbidden).
-    amount_usd_cents: u64,
+    pub(crate) amount_usd_cents: u64,
     /// Asset the payer sends, e.g. USDC, ETH, BTC, SOL, TRX.
     #[serde(default = "default_asset")]
-    asset: String,
+    pub(crate) asset: String,
     /// `simnet` (demo) | `evm` | `bitcoin` | `solana` | `tron`.
     /// EMPTY = auto-route: the asset catalog picks the default settlement
     /// venue (BTC→bitcoin, SOL→solana, USDC→evm/base, …).
     #[serde(default)]
-    chain: String,
+    pub(crate) chain: String,
     /// Network within the chain (`base`, `ethereum`, `mainnet`, …).
     /// EMPTY = the venue's default.
     #[serde(default)]
-    network: String,
+    pub(crate) network: String,
     /// Merchant-owned receiving address (non-custodial).
-    wallet: String,
+    pub(crate) wallet: String,
     /// ERC-20/SPL/TRC-20 contract override (empty = registry-resolved).
     #[serde(default)]
-    token_address: String,
+    pub(crate) token_address: String,
     /// Free-text description (hashed into the token, never stored raw).
     #[serde(default)]
-    description: String,
+    pub(crate) description: String,
     /// Invoice TTL override.
-    ttl_secs: Option<u64>,
+    pub(crate) ttl_secs: Option<u64>,
     /// Merchant webhook endpoint for this invoice's events.
     #[serde(default)]
-    webhook_url: String,
+    pub(crate) webhook_url: String,
 }
 
 fn default_asset() -> String { "USDC".into() }
@@ -550,7 +554,22 @@ async fn create_invoice(
     let ctx = require_auth(&state, &headers, "POST", "/v1/invoices", &body)?;
     guard(&state, &ctx.public_key)?;
     let req: CreateInvoiceReq = parse_body(&body)?;
+    let payload = build_invoice_payload(&state, &ctx, req, &headers).await?;
+    Ok(ok_created(payload))
+}
 
+/// Shared invoice-building core — validation → chain routing → settlement
+/// resolution → balance baseline → rate-locked pricing → token signing.
+/// Used by `POST /v1/invoices` (merchant keys) and by the connector
+/// universal receiver (`POST /v1/connect/payments`, client credentials), so
+/// every payment request in the system gets identical treatment: same fees,
+/// same auto-routing, same non-custodial address semantics.
+pub(crate) async fn build_invoice_payload(
+    state: &AppState,
+    ctx: &MerchantContext,
+    req: CreateInvoiceReq,
+    headers: &HeaderMap,
+) -> ApiResult<Value> {
     // ---- validation ------------------------------------------------------
     if req.amount_usd_cents == 0 || req.amount_usd_cents > 1_000_000_000_00 {
         return Err(AppError::bad_request("amount_usd_cents must be 1..=100,000,000,000"));
@@ -778,7 +797,7 @@ async fn create_invoice(
             "fee_amount_decimal": crate::chains::evm::base_units_to_decimal(fee_qty, decimals),
         })
     });
-    Ok(ok_created(json!({
+    Ok(json!({
         "invoice": invoice,
         "token": token,
         "payment_url": payment_url,
@@ -788,7 +807,7 @@ async fn create_invoice(
         "fee": fb,
         "fee_recipient": fee_recipient,
         "ttl_secs": ttl,
-    })))
+    }))
 }
 
 /// `GET /v1/invoices/:id?token=…` — live status, observed straight from the chain.
@@ -1771,6 +1790,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/simnet/blocks", get(simnet_blocks))
         .route("/v1/simnet/pay", post(simnet_pay))
         .route("/v1/simnet/balance/:address", get(simnet_balance))
+        // Connectors — the universal payment receiver (own module).
+        .merge(crate::connectors::router())
         .fallback(not_found)
         .with_state(state)
 }

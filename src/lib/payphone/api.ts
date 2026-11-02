@@ -465,7 +465,160 @@ export const api = {
       headers: Record<string, string>;
       delivery: { delivered: boolean; attempts?: number; status?: number; error?: string };
     }>("POST", "/webhooks/test", { url }, creds),
+
+  // ----------------------------------------------------------- connectors ---
+
+  /**
+   * Connectors — the universal payment receiver. One Client ID + Secret any
+   * platform can hold; payment requests minted with them auto-route to the
+   * owner's per-asset destination wallets. Auth is a plain credential
+   * header pair (X-PayPhone-Client / X-PayPhone-Secret) — platforms can't
+   * sign, they authenticate.
+   */
+
+  createConnector: (input: {
+    label?: string;
+    default_wallet?: string;
+    routes?: { asset: string; chain?: string; network?: string; wallet: string }[];
+    webhook_url?: string;
+  }) =>
+    request<{
+      client_id: string;
+      client_secret: string;
+      label: string;
+      routes: ConnectorRouteRow[];
+      webhook_url: string;
+      warning: string;
+    }>("POST", "/connectors", input),
+
+  connectorConfig: (clientId: string, clientSecret: string) =>
+    request<{
+      client_id: string;
+      label: string;
+      routes: ConnectorRouteRow[];
+      webhook_url: string;
+      created_at: number;
+      payments: ConnectorPaymentSummary[];
+      payment_count: number;
+    }>("GET", `/connectors/${encodeURIComponent(clientId)}`, undefined, null, connectorHeaders(clientId, clientSecret)),
+
+  updateConnectorConfig: (
+    clientId: string,
+    clientSecret: string,
+    input: {
+      label?: string;
+      routes?: { asset: string; chain?: string; network?: string; wallet: string }[];
+      webhook_url?: string;
+    }
+  ) =>
+    request<{ client_id: string; label: string; routes: ConnectorRouteRow[]; webhook_url: string; updated: boolean }>(
+      "POST",
+      `/connectors/${encodeURIComponent(clientId)}/config`,
+      input,
+      null,
+      connectorHeaders(clientId, clientSecret)
+    ),
+
+  rotateConnectorSecret: (clientId: string, clientSecret: string) =>
+    request<{ client_id: string; client_secret: string; warning: string }>(
+      "POST",
+      `/connectors/${encodeURIComponent(clientId)}/rotate`,
+      {},
+      null,
+      connectorHeaders(clientId, clientSecret)
+    ),
+
+  /** Mint a payment request — the universal receiver call any platform makes. */
+  createConnectPayment: (
+    clientId: string,
+    clientSecret: string,
+    input: {
+      asset: string;
+      amount_usd_cents: number;
+      network?: string;
+      reference?: string;
+      description?: string;
+      webhook_url?: string;
+      ttl_secs?: number;
+    }
+  ) =>
+    request<{
+      payment_id: string;
+      connector: string;
+      status: string;
+      asset: string;
+      chain: string;
+      network: string;
+      destination_wallet: string;
+      amount_usd_cents: number;
+      asset_amount: string;
+      payment_url: string;
+      checkout_path: string;
+      expires_at: number;
+      reference: string;
+    }>("POST", "/connect/payments", input, null, connectorHeaders(clientId, clientSecret)),
+
+  connectPaymentStatus: (clientId: string, clientSecret: string, paymentId: string) =>
+    request<{
+      payment: {
+        payment_id: string;
+        asset: string;
+        chain: string;
+        network: string;
+        amount_usd_cents: number;
+        reference: string;
+        destination: string;
+        status: string;
+        observed_qty: string;
+        seconds_left: number;
+      };
+      receipts: Record<string, unknown>[];
+    }>(
+      "GET",
+      `/connect/payments/${encodeURIComponent(paymentId)}`,
+      undefined,
+      null,
+      connectorHeaders(clientId, clientSecret)
+    ),
+
+  connectPayments: (clientId: string, clientSecret: string) =>
+    request<{ client_id: string; count: number; payments: ConnectorPaymentSummary[] }>(
+      "GET",
+      "/connect/payments",
+      undefined,
+      null,
+      connectorHeaders(clientId, clientSecret)
+    ),
 };
+
+/** Connector credential headers (plain auth — platforms hold ID + secret). */
+function connectorHeaders(clientId: string, clientSecret: string): Record<string, string> {
+  return {
+    "X-PayPhone-Client": clientId,
+    "X-PayPhone-Secret": clientSecret,
+  };
+}
+
+/** One connector auto-route row (asset → chain/network → destination wallet). */
+export interface ConnectorRouteRow {
+  asset: string;
+  chain: string;
+  network: string;
+  wallet: string;
+}
+
+/** One minted connector payment (summary — live status needs a poll). */
+export interface ConnectorPaymentSummary {
+  payment_id: string;
+  asset: string;
+  chain: string;
+  network: string;
+  amount_usd_cents: number;
+  reference: string;
+  destination: string;
+  status: string;
+  created_at: number;
+}
 
 // --------------------------------------------------------------- storage ----
 
@@ -580,3 +733,66 @@ export function usd(minor: number): string {
 export function shortHash(h: string, n = 10): string {
   return h.length <= n * 2 ? h : `${h.slice(0, n)}…${h.slice(-4)}`;
 }
+
+// -------------------------------------------------------------- connectors --
+
+const LS_CONNECTORS = "payphone.connectors.v1";
+export const CONNECTORS_EVENT = "payphone:connectors";
+
+/**
+ * A connector credential pair. The client secret is held in this browser
+ * (same documented demo posture as the merchant secret key): the engine
+ * stores only its master-keyed HMAC, so this is the ONLY copy — losing it
+ * means rotating. Production integrations keep it server-side.
+ */
+export interface StoredConnector {
+  client_id: string;
+  client_secret: string;
+  label: string;
+  routes: ConnectorRouteRow[];
+  webhook_url: string;
+  created_at: number;
+}
+
+export const connectorStore = {
+  raw(): string | null {
+    try {
+      return localStorage.getItem(LS_CONNECTORS);
+    } catch {
+      return null;
+    }
+  },
+  subscribe(cb: () => void): () => void {
+    const handler = () => cb();
+    window.addEventListener("storage", handler);
+    window.addEventListener(CONNECTORS_EVENT, handler);
+    return () => {
+      window.removeEventListener("storage", handler);
+      window.removeEventListener(CONNECTORS_EVENT, handler);
+    };
+  },
+  all(): StoredConnector[] {
+    try {
+      return JSON.parse(localStorage.getItem(LS_CONNECTORS) ?? "[]") as StoredConnector[];
+    } catch {
+      return [];
+    }
+  },
+  upsert(c: StoredConnector) {
+    const all = [c, ...connectorStore.all().filter((x) => x.client_id !== c.client_id)].slice(0, 20);
+    localStorage.setItem(LS_CONNECTORS, JSON.stringify(all));
+    notify(CONNECTORS_EVENT);
+  },
+  patch(clientId: string, p: Partial<StoredConnector>) {
+    const all = connectorStore
+      .all()
+      .map((c) => (c.client_id === clientId ? { ...c, ...p } : c));
+    localStorage.setItem(LS_CONNECTORS, JSON.stringify(all));
+    notify(CONNECTORS_EVENT);
+  },
+  remove(clientId: string) {
+    const all = connectorStore.all().filter((c) => c.client_id !== clientId);
+    localStorage.setItem(LS_CONNECTORS, JSON.stringify(all));
+    notify(CONNECTORS_EVENT);
+  },
+};

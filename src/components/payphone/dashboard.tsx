@@ -19,19 +19,21 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 import {
-  Activity as ActivityIcon, ArrowDownLeft, ArrowUpRight, Blocks, Copy, CreditCard, ExternalLink, Eye, EyeOff,
-  Fingerprint, Globe, KeyRound, Link2, Phone, Plus, RefreshCw, Send, ShieldCheck,
+  Activity as ActivityIcon, ArrowDownLeft, ArrowUpRight, Blocks, Cable, Copy, CreditCard, ExternalLink, Eye, EyeOff,
+  Fingerprint, Globe, KeyRound, Link2, Phone, Plus, RefreshCw, RotateCw, Send, ShieldCheck,
   Trash2, TrendingUp, Webhook, Zap,
 } from "lucide-react";
 import {
-  api, invoiceStore, session as store, setAdminToken, shortHash, usd,
+  api, connectorStore, invoiceStore, session as store, setAdminToken, shortHash, usd,
   ApiError,
+  type ConnectorPaymentSummary,
   type MerchantSession,
+  type StoredConnector,
   type WalletActivityAll,
 } from "@/lib/payphone/api";
 import type { EngineHealth, FeeSchedule, LocalInvoice } from "@/lib/payphone/types";
 import { walletAddressStored } from "@/lib/payphone/wallet";
-import { MonoValue, StatCard } from "./bits";
+import { CodeBlock, MonoValue, StatCard } from "./bits";
 
 const TIERS = ["free", "starter", "growth", "scale", "enterprise"] as const;
 
@@ -151,6 +153,7 @@ export function Dashboard({ onOpenCheckout }: { onOpenCheckout: (id: string, tok
           <TabsTrigger value="activity" className="gap-1.5"><ActivityIcon className="h-3.5 w-3.5" /> Activity</TabsTrigger>
           <TabsTrigger value="identity" className="gap-1.5"><Fingerprint className="h-3.5 w-3.5" /> Phone identity</TabsTrigger>
           <TabsTrigger value="webhooks" className="gap-1.5"><Webhook className="h-3.5 w-3.5" /> Webhooks</TabsTrigger>
+          <TabsTrigger value="connectors" className="gap-1.5"><Cable className="h-3.5 w-3.5" /> Connectors</TabsTrigger>
           <TabsTrigger value="keys" className="gap-1.5"><KeyRound className="h-3.5 w-3.5" /> API keys</TabsTrigger>
           <TabsTrigger value="explorer" className="gap-1.5"><Blocks className="h-3.5 w-3.5" /> SimNet explorer</TabsTrigger>
         </TabsList>
@@ -160,6 +163,7 @@ export function Dashboard({ onOpenCheckout }: { onOpenCheckout: (id: string, tok
         <TabsContent value="activity"><Activity merchant={merchant} /></TabsContent>
         <TabsContent value="identity"><Identity merchant={merchant} /></TabsContent>
         <TabsContent value="webhooks"><Webhooks merchant={merchant} /></TabsContent>
+        <TabsContent value="connectors"><Connectors merchant={merchant} /></TabsContent>
         <TabsContent value="keys"><Keys merchant={merchant} /></TabsContent>
         <TabsContent value="explorer"><Explorer /></TabsContent>
       </Tabs>
@@ -1194,6 +1198,443 @@ function Keys({ merchant }: { merchant: MerchantSession }) {
         </CardContent>
       </Card>
     </div>
+  );
+}
+
+// -------------------------------------------------------------- connectors ----
+
+/**
+ * Connectors — the universal payment receiver.
+ *
+ * One Client ID + Secret that ANY platform can hold (PayPal PYUSD off-ramps,
+ * Payoneer/Grey bridge flows, a SaaS backend). The platform mints a payment
+ * request with POST /v1/connect/payments {asset, amount_usd_cents,
+ * reference} and the engine auto-routes the money into the wallet the owner
+ * picked for that asset — address-to-address on-chain, never custodied.
+ */
+
+const DEMO_BUILD = process.env.NEXT_PUBLIC_PAYPHONE_DEMO === "1";
+
+type RouteDraft = { asset: string; network: string; wallet: string };
+
+function connectorSnippet(base: string, conn: StoredConnector): string {
+  return `curl -X POST ${base}/api/v1/connect/payments \\
+  -H "X-PayPhone-Client: ${conn.client_id}" \\
+  -H "X-PayPhone-Secret: ${conn.client_secret}" \\
+  -H "Content-Type: application/json" \\
+  -d '{"asset":"USDC","amount_usd_cents":2500,"reference":"order-1042"}'`;
+}
+
+function Connectors({ merchant }: { merchant: MerchantSession }) {
+  const raw = useSyncExternalStore(connectorStore.subscribe, connectorStore.raw, () => null);
+  const connectors = useMemo<StoredConnector[]>(() => {
+    try {
+      return raw ? (JSON.parse(raw) as StoredConnector[]) : [];
+    } catch {
+      return [];
+    }
+  }, [raw]);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [assets, setAssets] = useState<AssetEntry[]>([]);
+  const [label, setLabel] = useState("");
+  const [defaultWallet, setDefaultWallet] = useState(walletAddressStored() ?? merchant.wallet);
+  const [webhookUrl, setWebhookUrl] = useState("");
+  const [drafts, setDrafts] = useState<RouteDraft[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [issued, setIssued] = useState<StoredConnector | null>(null);
+  const { toast } = useToast();
+
+  // Live asset catalog drives the route builder (same source the engine routes by).
+  useEffect(() => {
+    let cancelled = false;
+    api.assets().then((sheet) => {
+      if (cancelled || !sheet?.assets?.length) return;
+      setAssets(sheet.assets.filter((a) => a.settleable));
+    }).catch(() => { /* builder falls back to USDC-only */ });
+    return () => { cancelled = true; };
+  }, []);
+
+  const active = connectors.find((c) => c.client_id === selected) ?? connectors[0] ?? null;
+
+  function setDraft(i: number, patch: Partial<RouteDraft>) {
+    setDrafts((d) => d.map((row, j) => (j === i ? { ...row, ...patch } : row)));
+  }
+
+  function addDraft() {
+    const first = assets[0]?.symbol ?? "USDC";
+    setDrafts((d) => [...d, { asset: first, network: "", wallet: defaultWallet }]);
+  }
+
+  async function create() {
+    if (DEMO_BUILD) {
+      toast({
+        title: "Connectors run on the live engine",
+        description: "This static demo build can't mint connectors — point the console at a deployed PayPhone engine.",
+        variant: "destructive",
+      });
+      return;
+    }
+    const routes = drafts
+      .filter((d) => d.asset && d.wallet.trim())
+      .map((d) => {
+        const entry = assets.find((a) => a.symbol === d.asset);
+        const sn = entry?.settleable_networks.find((s) => `${s.chain}/${s.network}` === d.network);
+        return {
+          asset: d.asset,
+          chain: sn?.chain ?? entry?.default_chain,
+          network: sn?.network ?? "",
+          wallet: d.wallet.trim(),
+        };
+      });
+    if (!defaultWallet.trim() && routes.length === 0) {
+      toast({
+        title: "Pick at least one destination",
+        description: "A default wallet (receives every asset that fits its shape) or explicit per-asset routes.",
+        variant: "destructive",
+      });
+      return;
+    }
+    setBusy(true);
+    try {
+      const r = await api.createConnector({
+        label: label.trim() || undefined,
+        default_wallet: defaultWallet.trim() || undefined,
+        routes: routes.length ? routes : undefined,
+        webhook_url: webhookUrl.trim() || undefined,
+      });
+      const stored: StoredConnector = {
+        client_id: r.client_id,
+        client_secret: r.client_secret,
+        label: r.label,
+        routes: r.routes,
+        webhook_url: r.webhook_url,
+        created_at: Math.floor(Date.now() / 1000),
+      };
+      connectorStore.upsert(stored);
+      setIssued(stored);
+      setSelected(stored.client_id);
+      setDrafts([]);
+      toast({ title: "Connector created", description: "Client secret shown once — hand it to the platform integration." });
+    } catch (e) {
+      toast({ title: "Connector creation failed", description: e instanceof Error ? e.message : "unknown error", variant: "destructive" });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function rotate(conn: StoredConnector) {
+    try {
+      const r = await api.rotateConnectorSecret(conn.client_id, conn.client_secret);
+      const updated = { ...conn, client_secret: r.client_secret };
+      connectorStore.patch(conn.client_id, { client_secret: r.client_secret });
+      setIssued(updated);
+      toast({ title: "Secret rotated", description: "The previous secret is dead — the new one is shown once." });
+    } catch (e) {
+      toast({ title: "Rotation failed", description: e instanceof Error ? e.message : "unknown error", variant: "destructive" });
+    }
+  }
+
+  const base = typeof window !== "undefined" ? window.location.origin : "https://your-engine.example.com";
+
+  return (
+    <div className="grid gap-4 lg:grid-cols-[420px_1fr]">
+      {/* ------------------------------------------------- create connector */}
+      <Card className="self-start">
+        <CardHeader className="pb-3">
+          <CardTitle className="flex items-center gap-2 text-base">
+            <Cable className="h-4 w-4 text-primary" /> Create connector
+          </CardTitle>
+          <p className="text-sm text-muted-foreground">
+            A universal receiver: one credential pair any platform can pay through, with YOU deciding
+            which wallet each currency lands in.
+          </p>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="space-y-2">
+            <Label htmlFor="conn-label">Label</Label>
+            <Input id="conn-label" placeholder="Checkout receiver — main store" value={label} onChange={(e) => setLabel(e.target.value)} />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="conn-default">
+              Default destination wallet <span className="text-muted-foreground">(receives every asset that fits its shape)</span>
+            </Label>
+            <Input
+              id="conn-default"
+              placeholder="0x… (EVM) · bc1… (Bitcoin) · T… (Tron) · base58 (Solana)"
+              value={defaultWallet}
+              onChange={(e) => setDefaultWallet(e.target.value)}
+              className="font-mono text-xs"
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="conn-webhook">Webhook URL <span className="text-muted-foreground">(optional — invoice.paid etc.)</span></Label>
+            <Input id="conn-webhook" placeholder="https://api.yourapp.com/payphone" value={webhookUrl} onChange={(e) => setWebhookUrl(e.target.value)} />
+          </div>
+
+          {/* per-asset overrides — "I want USDC to sit on Base, ETH on Ethereum" */}
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <Label>Per-asset routes <span className="text-muted-foreground">(optional overrides)</span></Label>
+              <Button size="sm" variant="outline" className="h-7 gap-1 text-xs" onClick={addDraft} disabled={!assets.length}>
+                <Plus className="h-3 w-3" /> Add route
+              </Button>
+            </div>
+            {drafts.length === 0 && (
+              <p className="text-[11px] text-muted-foreground">
+                Example: USDC → Base wallet, ETH → Ethereum wallet, PYUSD (PayPal USD) → Ethereum wallet.
+              </p>
+            )}
+            {drafts.map((d, i) => {
+              const entry = assets.find((a) => a.symbol === d.asset);
+              return (
+                <div key={i} className="space-y-1.5 rounded-lg border bg-background/40 p-2.5">
+                  <div className="grid grid-cols-2 gap-2">
+                    <Select
+                      value={d.asset}
+                      onValueChange={(v) => {
+                        const next = assets.find((a) => a.symbol === v);
+                        const stillSettles = next?.settleable_networks.some((s) => `${s.chain}/${s.network}` === d.network);
+                        setDraft(i, { asset: v, network: stillSettles ? d.network : "" });
+                      }}
+                    >
+                      <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
+                      <SelectContent className="max-h-64">
+                        {assets.map((a) => (
+                          <SelectItem key={a.symbol} value={a.symbol}>{a.symbol} — {a.name}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <Select value={d.network} onValueChange={(v) => setDraft(i, { network: v })}>
+                      <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="">Auto — {entry?.default_network ?? "default venue"}</SelectItem>
+                        {(entry?.settleable_networks ?? []).map((s) => (
+                          <SelectItem key={`${s.chain}/${s.network}`} value={`${s.chain}/${s.network}`}>
+                            {s.chain === "evm" ? s.network : `${s.chain}/${s.network}`}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="flex gap-2">
+                    <Input
+                      placeholder="Destination wallet for this asset"
+                      value={d.wallet}
+                      onChange={(e) => setDraft(i, { wallet: e.target.value })}
+                      className="h-8 font-mono text-xs"
+                    />
+                    <Button size="sm" variant="ghost" className="h-8 w-8 shrink-0 p-0 text-muted-foreground hover:text-destructive" aria-label="Remove route" onClick={() => setDrafts((rows) => rows.filter((_, j) => j !== i))}>
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </Button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          <Button className="w-full gap-2" onClick={create} disabled={busy}>
+            {busy ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Cable className="h-4 w-4" />}
+            {busy ? "Minting connector…" : "Create connector"}
+          </Button>
+
+          {issued && (
+            <div className="space-y-2 rounded-lg border border-primary/40 bg-primary/5 p-3 text-sm">
+              <div className="font-medium text-primary">Connector ready — client secret shown ONCE</div>
+              <div className="flex flex-wrap items-center gap-2">
+                <MonoValue value={issued.client_id} display={`client_id ${shortHash(issued.client_id, 12)}`} />
+                <MonoValue value={issued.client_secret} display={`client_secret ${issued.client_secret.slice(0, 10)}…`} />
+              </div>
+              <p className="text-xs text-muted-foreground">
+                The engine stores only a keyed hash — this browser holds the only copy. Losing it means rotating.
+              </p>
+              <CodeBlock lang="bash" code={connectorSnippet(base, issued)} />
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* ------------------------------------------------------- right side */}
+      <div className="space-y-4">
+        {/* connector list */}
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base">Your connectors ({connectors.length})</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {connectors.length === 0 ? (
+              <p className="py-6 text-center text-sm text-muted-foreground">
+                No connectors yet — create one and hand the credentials to any platform.
+              </p>
+            ) : (
+              <div className="space-y-2">
+                {connectors.map((c) => (
+                  <div
+                    key={c.client_id}
+                    className={`rounded-lg border px-3 py-2.5 text-sm ${active?.client_id === c.client_id ? "border-primary/50 bg-primary/5" : "bg-background/40"}`}
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <button type="button" className="min-w-0 text-left" onClick={() => setSelected(c.client_id)}>
+                        <div className="font-medium">{c.label || "Untitled connector"}</div>
+                        <div className="mt-0.5 font-mono text-xs text-muted-foreground">{shortHash(c.client_id, 14)}</div>
+                      </button>
+                      <div className="flex items-center gap-1.5">
+                        <Button size="sm" variant="ghost" className="h-7 gap-1 px-2 text-xs" onClick={() => rotate(c)} title="Replace the client secret">
+                          <RotateCw className="h-3 w-3" /> Rotate
+                        </Button>
+                        <Button size="sm" variant="ghost" className="h-7 w-7 p-0 text-muted-foreground hover:text-destructive" aria-label="Forget connector locally" onClick={() => connectorStore.remove(c.client_id)} title="Forget locally (the engine record lives until restart)">
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </Button>
+                      </div>
+                    </div>
+                    <div className="mt-1.5 flex flex-wrap gap-1.5">
+                      {c.routes.map((r, i) => (
+                        <Badge key={i} variant="outline" className="text-[10px]">
+                          {r.asset === "*" ? "ANY" : r.asset} → {r.chain === "evm" ? (r.network || "default") : r.chain}
+                        </Badge>
+                      ))}
+                      {c.webhook_url && <Badge variant="secondary" className="text-[10px]">webhook</Badge>}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* incoming payments */}
+        <ConnectorPayments conn={DEMO_BUILD ? null : active} />
+
+        {/* the guide — what this unlocks, honestly */}
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base">Receiving from any platform</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3 text-sm">
+            <div className="flex items-start gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-2.5">
+              <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-emerald-500" />
+              <p className="text-xs leading-relaxed text-muted-foreground">
+                <strong className="text-foreground">Non-custodial by construction.</strong> A minted payment
+                request points straight at YOUR wallet for that asset — funds move address-to-address on-chain
+                and the engine verifies the transfer live. PayPhone never holds the money, so there is nothing
+                to withdraw, freeze or lose.
+              </p>
+            </div>
+            <div>
+              <div className="font-medium">PayPal → PYUSD (works today)</div>
+              <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                PYUSD is PayPal&apos;s own stablecoin, live on Ethereum and Arbitrum. Eligible PayPal users can
+                withdraw PYUSD to any 0x… address — add a PYUSD route above and PayPal money lands in your wallet
+                like any other crypto. Other PayPal balances can only be off-ramped by PayPal itself (no third
+                party can pull from them — that&apos;s a PayPal policy, not a PayPhone limit).
+              </p>
+            </div>
+            <div>
+              <div className="font-medium">Payoneer · Grey · Wise → bridge flows</div>
+              <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                Their fiat rails are account-gated on their side. Two bridges work today: (1) withdraw to bank /
+                mobile money, buy USDT or USDC on any on-ramp, send on-chain to your connector destination — the
+                payment shows up in the feed below; (2) platforms with business APIs call{" "}
+                <span className="font-mono text-[11px]">POST /v1/connect/payments</span> with your credentials and
+                pay the minted request — full API docs in the Docs tab.
+              </p>
+            </div>
+            <div>
+              <div className="font-medium">Any crypto platform → native</div>
+              <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                One credential pair receives USDC, USDT, ETH, BTC, SOL, PYUSD and more across 10+ networks —
+                you choose which wallet each currency sits in, and webhooks announce every settled payment.
+              </p>
+            </div>
+            {active && <CodeBlock lang="bash" code={connectorSnippet(base, active)} />}
+          </CardContent>
+        </Card>
+      </div>
+    </div>
+  );
+}
+
+/** Live payment feed for the selected connector (10s poll). */
+function ConnectorPayments({ conn }: { conn: StoredConnector | null }) {
+  const [rows, setRows] = useState<ConnectorPaymentSummary[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [checkedAt, setCheckedAt] = useState<number | null>(null);
+
+  const load = useCallback(
+    async (silent?: boolean) => {
+      if (!conn) return;
+      try {
+        const d = await api.connectPayments(conn.client_id, conn.client_secret);
+        setRows(d.payments);
+        setError(null);
+        setCheckedAt(Date.now());
+      } catch (e) {
+        if (!silent) setError(e instanceof Error ? e.message : "engine offline?");
+      }
+    },
+    [conn]
+  );
+
+  useEffect(() => {
+    setRows([]);
+    setError(null);
+    void load();
+  }, [load]);
+  useEffect(() => {
+    if (!conn) return;
+    const t = window.setInterval(() => void load(true), 10000);
+    return () => window.clearInterval(t);
+  }, [conn, load]);
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <CardTitle className="flex items-center gap-2 text-base">
+            <ArrowDownLeft className="h-4 w-4 text-primary" /> Incoming connector payments
+          </CardTitle>
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            {checkedAt && <span>checked {new Date(checkedAt).toLocaleTimeString()}</span>}
+            <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => void load()} disabled={!conn}>
+              Refresh
+            </Button>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent>
+        {!conn ? (
+          <p className="py-6 text-center text-sm text-muted-foreground">
+            Select a connector to watch its payment feed.
+          </p>
+        ) : error ? (
+          <p className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-destructive">{error}</p>
+        ) : rows.length === 0 ? (
+          <p className="py-6 text-center text-sm text-muted-foreground">
+            No payments minted yet — the platform (or your curl) creates them via POST /v1/connect/payments.
+          </p>
+        ) : (
+          <div className="pp-scroll max-h-80 space-y-2 overflow-y-auto pr-1">
+            {rows.map((p) => (
+              <div key={p.payment_id} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border bg-background/40 px-3 py-2.5 text-sm">
+                <div className="min-w-0">
+                  <div className="font-medium">
+                    {usd(p.amount_usd_cents)} <span className="text-xs font-normal text-muted-foreground">· {p.asset} on {p.network || p.chain}</span>
+                  </div>
+                  <div className="truncate text-xs text-muted-foreground">
+                    {p.reference || "no reference"} · {shortHash(p.payment_id, 10)} · → {shortHash(p.destination, 8)}
+                  </div>
+                </div>
+                <Badge
+                  variant={p.status === "paid" ? "default" : p.status === "expired" ? "secondary" : "outline"}
+                  className="text-xs"
+                >
+                  {p.status}
+                </Badge>
+              </div>
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 

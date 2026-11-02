@@ -31,6 +31,15 @@ wallets — 7 EVM mainnets + Bitcoin + Solana + Tron.
   the engine verifies the payment and issues your key. See
   `GET /v1/tiers` for the live rules. (Special arrangements:
   [lex.ecosystem@gmail.com](mailto:lex.ecosystem@gmail.com).)
+- **Run a platform?** **Connectors** make PayPhone a universal receiver:
+  one Client ID + Secret that any service can hold — PayPal PYUSD
+  off-ramps, Payoneer/Grey bridge flows, your own backend — minting
+  payment requests with `POST /v1/connect/payments {asset,
+  amount_usd_cents, reference}`. The engine auto-routes every currency
+  into the wallet you picked for it (USDC → Base, ETH → Ethereum,
+  PYUSD → Ethereum…), address-to-address on-chain, never custodied.
+  Create yours in the dashboard's **Connectors** tab or `POST
+  /v1/connectors`.
 - **Just exploring?** Try the [in-browser demo](https://sdeac2026-dotcom.github.io/payphone/)
   (SimNet toy chain, nothing real moves) or deploy your own node below.
 
