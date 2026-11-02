@@ -428,6 +428,30 @@ try:
 except Exception as e:
     check("unknown environment -> controlled 400", False, repr(e))
 
+# 12. security regression — the webhook-verify endpoint must never sign
+#     caller-chosen payloads with the engine's own signing key (a public
+#     signature oracle: the same key authenticates invoice tokens).
+print("\n[12] security regression checks")
+try:
+    code, body = post("/api/v1/webhooks/verify",
+                      {"secret": "some-merchant-secret", "timestamp": "1730000000",
+                       "signature": "00", "payload": "payphone.inv.v1.audit-probe"}, timeout=20)
+    data = body.get("data") or {}
+    check("webhook verify returns a verdict WITHOUT leaking a signature",
+          code == 200 and data.get("valid") is False and "expected_signature" not in data,
+          f"code={code} keys={sorted(data.keys())}")
+except Exception as e:
+    check("webhook verify returns a verdict WITHOUT leaking a signature", False, repr(e))
+
+try:
+    code, body = post("/api/v1/webhooks/verify",
+                      {"secret": "", "timestamp": "1730000000", "signature": "00",
+                       "payload": "x"}, timeout=20)
+    check("webhook verify with empty secret -> controlled 400",
+          code == 400, f"code={code} {json.dumps(body)[:120]}")
+except Exception as e:
+    check("webhook verify with empty secret -> controlled 400", False, repr(e))
+
 print()
 print(f"RESULT: {len(passed)} passed, {len(failed)} failed")
 if failed:
