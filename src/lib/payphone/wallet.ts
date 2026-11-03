@@ -30,6 +30,7 @@ import {
   createWalletClient,
   encodeFunctionData,
   formatUnits,
+  fallback,
   http,
   parseUnits,
   type Chain,
@@ -55,12 +56,16 @@ import { api } from "./api";
 
 // ------------------------------------------------------------------ chains --
 
-/** Wallet-enabled networks: engine names → viem chains + vetted public RPCs. */
+/** Wallet-enabled networks: engine names → viem chains + vetted public RPCs.
+ * Every chain carries at least one FALLBACK RPC (taken from the engine's own
+ * verified gateway registry) — a throttled or napping free public RPC hands
+ * the request to the next transport instead of failing the balance read. */
 export interface WalletChain {
   name: string;
   label: string;
   chain: Chain;
   rpc: string;
+  fallbacks: string[];
   native: string;
   explorer: string;
 }
@@ -71,6 +76,7 @@ export const WALLET_CHAINS: WalletChain[] = [
     label: "Worldchain",
     chain: worldchain,
     rpc: "https://worldchain-mainnet.g.alchemy.com/public",
+    fallbacks: [],
     native: "ETH",
     explorer: "https://worldscan.org",
   },
@@ -79,6 +85,7 @@ export const WALLET_CHAINS: WalletChain[] = [
     label: "Base",
     chain: base,
     rpc: "https://mainnet.base.org",
+    fallbacks: ["https://base-rpc.publicnode.com", "https://base.drpc.org"],
     native: "ETH",
     explorer: "https://basescan.org",
   },
@@ -87,6 +94,7 @@ export const WALLET_CHAINS: WalletChain[] = [
     label: "OP Mainnet",
     chain: optimism,
     rpc: "https://mainnet.optimism.io",
+    fallbacks: ["https://optimism-rpc.publicnode.com", "https://optimism.drpc.org"],
     native: "ETH",
     explorer: "https://optimistic.etherscan.io",
   },
@@ -95,6 +103,7 @@ export const WALLET_CHAINS: WalletChain[] = [
     label: "Polygon",
     chain: polygon,
     rpc: "https://polygon-bor-rpc.publicnode.com",
+    fallbacks: ["https://polygon.drpc.org"],
     native: "POL",
     explorer: "https://polygonscan.com",
   },
@@ -103,6 +112,7 @@ export const WALLET_CHAINS: WalletChain[] = [
     label: "Arbitrum One",
     chain: arbitrum,
     rpc: "https://arb1.arbitrum.io/rpc",
+    fallbacks: ["https://arbitrum-one-rpc.publicnode.com", "https://arbitrum.drpc.org"],
     native: "ETH",
     explorer: "https://arbiscan.io",
   },
@@ -111,6 +121,7 @@ export const WALLET_CHAINS: WalletChain[] = [
     label: "BNB Chain",
     chain: bsc,
     rpc: "https://bsc-rpc.publicnode.com",
+    fallbacks: ["https://bsc.drpc.org"],
     native: "BNB",
     explorer: "https://bscscan.com",
   },
@@ -119,6 +130,7 @@ export const WALLET_CHAINS: WalletChain[] = [
     label: "Avalanche",
     chain: avalanche,
     rpc: "https://avalanche-c-chain-rpc.publicnode.com",
+    fallbacks: ["https://api.avax.network/ext/bc/C/rpc", "https://avalanche.drpc.org"],
     native: "AVAX",
     explorer: "https://snowtrace.io",
   },
@@ -501,9 +513,13 @@ export async function guardianRestore(
 
 /** viem clients for the unlocked keystore account — shared by wallet flows
  * (send) and earn flows (stake / supply / governance) so gas + signing
- * behavior stays identical everywhere. */
+ * behavior stays identical everywhere. The fallback transport shifts to the
+ * chain's backup RPCs (8 s timeouts) when the primary throttles or hangs. */
 export function clients(c: WalletChain) {
-  const transport = http(c.rpc);
+  const transport = fallback(
+    [http(c.rpc, { timeout: 8_000 }), ...c.fallbacks.map((u) => http(u, { timeout: 8_000 }))],
+    { rank: false }
+  );
   const publicClient = createPublicClient({ chain: c.chain, transport });
   const walletClient = createWalletClient({ chain: c.chain, transport, account: requireAccount() });
   return { publicClient, walletClient };
