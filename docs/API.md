@@ -72,6 +72,24 @@ Connector trust model: the secret is verify-only (keyed HMAC at rest, constant-t
 
 The USD → PYUSD → wallet bridge these power: PayPal USD balance → buy PYUSD in the PayPal app → send PYUSD on-chain to the destination wallet (Ethereum/Arbitrum) → the engine observes it like any asset payment (paid at network depth, webhook fires). Console: the dashboard's **PayPal** tab walks all steps with the destination pre-filled.
 
+### Earn & governance (the wallet as an earning, governing participant)
+| | |
+|---|---|
+| `GET /v1/earn/opportunities` | The curated earning registry: liquid staking, DeFi lending, governance, plus roadmap entries (NFT gallery, dApp consent surface). Each entry: verified contract addresses, `execution` (`wallet_flow` / `positions_only` / `manual`), honest `risks[]`, concrete `steps[]`, and a `reward_source` that explains mechanically where yield comes from — **no APY is ever quoted** (live rates live at the protocols). Operators extend or replace the set via `PAYPHONE_EARN_REGISTRY_JSON` (same validation). |
+| `GET /v1/earn/positions?network=&address=` | Live on-chain read of what `address` HOLDS across the registry's watchable contracts (stETH, wstETH, governance tokens) plus the native balance — straight through the RPC mesh, failover included. |
+| `GET /v1/governance/power?opportunity=&address=` | Voting power for a governance entry: token balance + delegated votes at the measurement block. OZ ERC20Votes reads `getVotes(address, lastSettledBlock)`; Compound-style tokens (UNI) read `getCurrentVotes(address)` per the entry's `votes_function`. |
+| `POST /v1/governance/vote-calldata` `{opportunity, proposal_id: "45", support: 0\|1\|2}` | The exact transaction the wallet signs to cast a vote (`castVote(uint256,uint8)` on the entry's governor): `{to, value: "0x0", data, chain_id}`. 0=against, 1=for, 2=abstain. |
+| `POST /v1/governance/delegate-calldata` `{opportunity, delegatee}` | The transaction that activates voting power: `delegate(address)` on the governance token itself. Delegation moves voting power, never tokens. |
+
+Non-custodial invariant: every earning flow ends in a transaction the WALLET
+signs locally (console: **Wallet → Earn & Governance**, same keystore as
+sends). The engine builds bytes and reads chains — it holds no keys, never
+broadcasts on the user's behalf, and never quotes yield numbers. Default
+registry ships only addresses verified against the protocols' own
+documentation (docs.lido.fi, developers.uniswap.org, aave.com); an entry
+that cannot be verified ships as `status: "roadmap"` with no address, never
+as a guess. Full guide: `docs/EARN.md`.
+
 ### Rates & conversion
 | | |
 |---|---|

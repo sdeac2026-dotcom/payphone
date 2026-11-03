@@ -415,6 +415,22 @@ impl EvmAdapter {
                     bench_it(&mut pools, secs);
                     continue;
                 }
+                // Gateway-class JSON-RPC errors: a bare internal error or a
+                // capacity refusal is the NODE failing, not the chain
+                // answering — bench and fail over. Real contract reverts look
+                // different (-32000 with revert text) and stay honest errors.
+                let m = msg.to_lowercase();
+                let code = err["code"].as_i64().unwrap_or(0);
+                if code == -32603
+                    || m.contains("internal error")
+                    || m.contains("cannot fulfill")
+                    || m.contains("not supported")
+                {
+                    last_err = Some(format!("rpc {method} node error from {host} ({msg})"));
+                    let mut pools = self.pools.lock().expect("rpc pool lock");
+                    bench_it(&mut pools, TRANSPORT_BENCH_SECS);
+                    continue;
+                }
                 return Err(AppError::upstream(format!("rpc error: {msg}")));
             }
             let result = body["result"].clone();
@@ -495,6 +511,26 @@ impl EvmAdapter {
             .and_then(parse_hex_quantity)
             .map(|q| q as u64)
             .ok_or_else(|| AppError::upstream("bad chainId"))
+    }
+
+    /// Read-only contract call (`eth_call`) against `to` with `data` at the
+    /// given block tag (`"latest"` or a hex block number), routed through the
+    /// same gateway pool as every other read. Returns the raw hex result
+    /// word — callers decode via [`parse_hex_quantity`].
+    pub async fn eth_call(
+        &self,
+        network: &str,
+        to: &str,
+        data: &str,
+        block: &str,
+    ) -> ApiResult<String> {
+        let result = self
+            .rpc(network, "eth_call", json!([{ "to": to, "data": data }, block]))
+            .await?;
+        result
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| AppError::upstream("eth_call returned a non-string result"))
     }
 
     /// Chain tip (confirmation-depth math) — public adapter API.

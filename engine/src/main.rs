@@ -13,6 +13,7 @@
 mod chains;
 mod config;
 mod connectors;
+mod earn;
 mod error;
 mod fees;
 mod invoice;

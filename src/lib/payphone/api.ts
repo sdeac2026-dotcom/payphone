@@ -617,7 +617,110 @@ export const api = {
       as_of_time: string | null;
       last_refresh_time: string | null;
     }>("POST", "/paypal/balance", input),
+
+  // ----------------------------------------------------------------- earn ----
+
+  /** The curated earning registry: staking, lending, governance, roadmap. */
+  earnOpportunities: () =>
+    request<{
+      count: number;
+      active_count: number;
+      registry_source: string;
+      non_custodial: string;
+      yield_policy: string;
+      opportunities: EarnOpportunity[];
+      extend: string;
+    }>("GET", "/earn/opportunities"),
+
+  /** Live on-chain balances of the registry's watchable receipt tokens. */
+  earnPositions: (network: string, address: string) =>
+    request<{
+      network: string;
+      chain_id: number;
+      address: string;
+      native_balance: string;
+      positions: EarnPosition[];
+      note: string;
+    }>("GET", `/earn/positions?network=${encodeURIComponent(network)}&address=${encodeURIComponent(address)}`),
+
+  /** Voting power (token balance + delegated votes) for a governance entry. */
+  governancePower: (opportunity: string, address: string) =>
+    request<{
+      opportunity: string;
+      protocol: string;
+      network: string;
+      governor: string;
+      token: string;
+      address: string;
+      token_balance: string;
+      votes: string;
+      votes_raw: string;
+      measured_at_block: number;
+      note: string;
+    }>("GET", `/governance/power?opportunity=${encodeURIComponent(opportunity)}&address=${encodeURIComponent(address)}`),
+
+  /** The exact transaction the wallet signs to cast a governance vote. */
+  governanceVoteCalldata: (input: { opportunity: string; proposal_id: string; support: number }) =>
+    request<{
+      opportunity: string;
+      action: string;
+      to: string;
+      value: string;
+      data: string;
+      chain_id: number;
+      network: string;
+      support_meaning: Record<string, string>;
+      how: string;
+      non_custodial: string;
+    }>("POST", "/governance/vote-calldata", input),
+
+  /** The exact transaction that activates voting power (delegate on the token). */
+  governanceDelegateCalldata: (input: { opportunity: string; delegatee: string }) =>
+    request<{
+      opportunity: string;
+      action: string;
+      to: string;
+      value: string;
+      data: string;
+      chain_id: number;
+      network: string;
+      how: string;
+      non_custodial: string;
+    }>("POST", "/governance/delegate-calldata", input),
 };
+
+/** One curated earning opportunity (engine registry, GET /v1/earn/opportunities). */
+export interface EarnOpportunity {
+  id: string;
+  network: string;
+  kind: "liquid_staking" | "defi_lending" | "governance" | "nft" | "dapp";
+  protocol: string;
+  label: string;
+  description: string;
+  asset: string;
+  receipt_asset: string;
+  target_contract: string;
+  token_contract: string;
+  receipt_contract: string;
+  receipt_decimals: number;
+  token_decimals: number;
+  votes_function?: string;
+  execution: "wallet_flow" | "positions_only" | "manual";
+  status: "active" | "roadmap";
+  reward_source: string;
+  risks: string[];
+  steps: string[];
+}
+
+/** One live position row (GET /v1/earn/positions). */
+export interface EarnPosition {
+  opportunity_id: string;
+  protocol?: string;
+  symbol: string;
+  contract?: string;
+  balance?: string;
+  error?: string;
+}
 
 /** Connector credential headers (plain auth — platforms hold ID + secret). */
 function connectorHeaders(clientId: string, clientSecret: string): Record<string, string> {

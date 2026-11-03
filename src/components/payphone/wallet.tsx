@@ -43,6 +43,7 @@ import {
 } from "@/lib/payphone/wallet";
 import { WALLET_SEND_FEE_BPS } from "@/lib/payphone/wallet";
 import { api, ApiError, type WalletActivityAll } from "@/lib/payphone/api";
+import { EarnPanel } from "./earn";
 
 export interface WalletPrefill {
   network?: string;
@@ -805,6 +806,9 @@ function WalletMain({ prefill, onChanged }: { prefill?: WalletPrefill; onChanged
           </div>
         </CardContent>
       </Card>
+
+      {/* earn & governance — stake, lend, vote; same local keystore signing */}
+      <EarnPanel chain={chain} onChanged={loadBalances} />
 
       <div className="grid gap-6 lg:grid-cols-2">
         {/* balances */}

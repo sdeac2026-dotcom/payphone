@@ -1,0 +1,301 @@
+/**
+ * PayPhone Earn — the wallet as an earning, governing network participant.
+ *
+ * Every flow here ends in a transaction signed LOCALLY by the keystore
+ * account (the same `clients()` signing path as sends) and broadcast through
+ * public RPCs. The engine's role is the registry (verified contract
+ * addresses, honest risk notes) and the read models (positions, voting
+ * power) — it never holds a key and never custodies an asset.
+ *
+ * ABIs below are the exact public signatures of the registered protocols:
+ * Lido `submit(address _referral) payable` (docs.lido.fi), wstETH
+ * `wrap/unwrap(uint256)` (docs.lido.fi/contracts/wsteth), Aave V3 Pool
+ * `supply/withdraw` (aave.com docs), OpenZeppelin Governor `castVote`
+ * + ERC20Votes `delegate`. Nothing here signs blind: gas is estimated with
+ * the REAL calldata and the native-balance pre-flight from the send flow
+ * applies to every earning transaction too.
+ */
+
+import {
+  erc20Abi,
+  parseEther,
+  parseUnits,
+  encodeFunctionData,
+  type Address,
+} from "viem";
+import { api, type EarnOpportunity } from "./api";
+import { clients, gasMessage, type WalletChain } from "./wallet";
+
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as const;
+
+/** Registry contract addresses (mirrored from the engine's verified registry). */
+export const EARN_CONTRACTS = {
+  lidoStETH: "0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84" as const,
+  lidoWstETH: "0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0" as const,
+  aaveV3Pool: "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2" as const,
+  uniGovernor: "0x408ED6354d4973f66138C91495F2f2FCbd8724C3" as const,
+  uniToken: "0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984" as const,
+} as const;
+
+// ------------------------------------------------------------------- ABIs ----
+
+/** Lido stETH entry point — docs.lido.fi/contracts/lido. */
+export const LIDO_ABI = [
+  {
+    name: "submit",
+    type: "function",
+    stateMutability: "payable",
+    inputs: [{ name: "_referral", type: "address" }],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+] as const;
+
+/** Lido wstETH wrapper — docs.lido.fi/contracts/wsteth. */
+export const WSTETH_ABI = [
+  {
+    name: "wrap",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [{ name: "_stETHAmount", type: "uint256" }],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+  {
+    name: "unwrap",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [{ name: "_wstETHAmount", type: "uint256" }],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+] as const;
+
+/** Aave V3 Pool — aave.com/docs/aave-v3/smart-contracts/pool. */
+export const AAVE_POOL_ABI = [
+  {
+    name: "supply",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "asset", type: "address" },
+      { name: "amount", type: "uint256" },
+      { name: "onBehalfOf", type: "address" },
+      { name: "referralCode", type: "uint16" },
+    ],
+    outputs: [],
+  },
+  {
+    name: "withdraw",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "asset", type: "address" },
+      { name: "amount", type: "uint256" },
+      { name: "to", type: "address" },
+    ],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+] as const;
+
+/** OpenZeppelin/Bravo Governor vote cast. */
+export const GOVERNOR_ABI = [
+  {
+    name: "castVote",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "proposalId", type: "uint256" },
+      { name: "support", type: "uint8" },
+    ],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+] as const;
+
+// --------------------------------------------------------------- helpers ----
+
+async function assertGasAffordable(
+  c: WalletChain,
+  to: Address,
+  data: `0x${string}`,
+  value: bigint,
+  maxFee: bigint | undefined
+): Promise<void> {
+  const { publicClient, walletClient } = clients(c);
+  const account = walletClient.account!;
+  if (maxFee === undefined) return;
+  const [balance, gas] = await Promise.all([
+    publicClient.getBalance({ address: account.address }),
+    publicClient.estimateGas({ account, to, data, value }),
+  ]);
+  if (gas * maxFee > balance) throw new Error(gasMessage(c, c.native));
+}
+
+/** Estimate with the REAL calldata, then sign + broadcast one transaction. */
+async function signAndBroadcast(
+  c: WalletChain,
+  to: Address,
+  data: `0x${string}`,
+  value: bigint
+): Promise<string> {
+  const { publicClient, walletClient } = clients(c);
+  const account = walletClient.account!;
+  const fees = await publicClient.estimateFeesPerGas();
+  await assertGasAffordable(c, to, data, value, fees.maxFeePerGas ?? fees.gasPrice);
+  const nonce = await publicClient.getTransactionCount({ address: account.address, blockTag: "pending" });
+  return walletClient.sendTransaction({
+    to,
+    data,
+    value,
+    nonce,
+    account,
+    chain: c.chain,
+    maxFeePerGas: fees.maxFeePerGas ?? undefined,
+    maxPriorityFeePerGas: fees.maxPriorityFeePerGas ?? undefined,
+  });
+}
+
+/** Approve an EXACT amount — never an infinite allowance. */
+async function approveExact(
+  c: WalletChain,
+  token: Address,
+  spender: Address,
+  qty: bigint
+): Promise<string> {
+  const { publicClient, walletClient } = clients(c);
+  const account = walletClient.account!;
+  const data = encodeFunctionData({ abi: erc20Abi, functionName: "approve", args: [spender, qty] });
+  const [gas, fees] = await Promise.all([
+    publicClient.estimateGas({ account, to: token, data }),
+    publicClient.estimateFeesPerGas(),
+  ]);
+  await assertGasAffordable(c, token, data, 0n, fees.maxFeePerGas ?? fees.gasPrice);
+  const nonce = await publicClient.getTransactionCount({ address: account.address, blockTag: "pending" });
+  return walletClient.sendTransaction({
+    to: token,
+    data,
+    gas,
+    nonce,
+    account,
+    chain: c.chain,
+    maxFeePerGas: fees.maxFeePerGas ?? undefined,
+    maxPriorityFeePerGas: fees.maxPriorityFeePerGas ?? undefined,
+  });
+}
+
+/** Resolve a token address + decimals from the engine's live chain sheet. */
+export async function settleableToken(
+  network: string,
+  symbol: string
+): Promise<{ address: Address; decimals: number }> {
+  const sheet = await api.chains();
+  const net = sheet.networks.find((n) => n.name === network);
+  const t = net?.settleable_tokens.find((x) => x.symbol.toLowerCase() === symbol.toLowerCase());
+  if (!t) throw new Error(`${symbol} is not settleable on ${network} — cannot build the approval.`);
+  return { address: t.address as Address, decimals: t.decimals };
+}
+
+function requireNetwork(c: WalletChain, network: string): void {
+  if (c.name !== network) {
+    throw new Error(
+      `This opportunity lives on ${network} — switch the wallet to that network (top-right selector) and try again.`
+    );
+  }
+}
+
+// ----------------------------------------------------------------- flows ----
+
+/**
+ * Stake ETH with Lido → stETH. ONE payable transaction
+ * (`submit(referral)`); stETH lands immediately and rebases daily.
+ */
+export async function stakeEthLido(c: WalletChain, amountEth: string): Promise<string> {
+  requireNetwork(c, "ethereum");
+  const data = encodeFunctionData({ abi: LIDO_ABI, functionName: "submit", args: [ZERO_ADDRESS] });
+  return signAndBroadcast(c, EARN_CONTRACTS.lidoStETH, data, parseEther(amountEth.trim()));
+}
+
+/**
+ * Wrap stETH → wstETH (non-rebasing). Two signed transactions:
+ * exact-amount approve, then `wrap(uint256)`.
+ */
+export async function wrapStETH(c: WalletChain, amountStEth: string): Promise<{ approve: string; wrap: string }> {
+  requireNetwork(c, "ethereum");
+  const qty = parseUnits(amountStEth.trim(), 18);
+  const approve = await approveExact(c, EARN_CONTRACTS.lidoStETH, EARN_CONTRACTS.lidoWstETH, qty);
+  const wrap = await signAndBroadcast(
+    c,
+    EARN_CONTRACTS.lidoWstETH,
+    encodeFunctionData({ abi: WSTETH_ABI, functionName: "wrap", args: [qty] }),
+    0n
+  );
+  return { approve, wrap };
+}
+
+/**
+ * Supply USDC to Aave V3 → aUSDC receipt. Two signed transactions:
+ * exact-amount approve, then `supply(asset, amount, onBehalfOf, 0)`.
+ */
+export async function supplyAaveUsdc(c: WalletChain, amountUsdc: string): Promise<{ approve: string; supply: string }> {
+  requireNetwork(c, "ethereum");
+  const usdc = await settleableToken("ethereum", "USDC");
+  const qty = parseUnits(amountUsdc.trim(), usdc.decimals);
+  const { walletClient } = clients(c);
+  const onBehalfOf = walletClient.account!.address;
+  const approve = await approveExact(c, usdc.address, EARN_CONTRACTS.aaveV3Pool, qty);
+  const supply = await signAndBroadcast(
+    c,
+    EARN_CONTRACTS.aaveV3Pool,
+    encodeFunctionData({
+      abi: AAVE_POOL_ABI,
+      functionName: "supply",
+      args: [usdc.address, qty, onBehalfOf, 0],
+    }),
+    0n
+  );
+  return { approve, supply };
+}
+
+/**
+ * Activate voting power: `delegate(address)` on the governance token. The
+ * engine builds the calldata (registry-verified token); the wallet signs.
+ */
+export async function governanceDelegate(
+  c: WalletChain,
+  opportunityId: string,
+  delegatee: string
+): Promise<string> {
+  const tx = await api.governanceDelegateCalldata({ opportunity: opportunityId, delegatee: delegatee.trim() });
+  requireNetwork(c, tx.network);
+  return signAndBroadcast(c, tx.to as Address, tx.data as `0x${string}`, 0n);
+}
+
+/**
+ * Cast a vote: `castVote(proposalId, support)` on the governor
+ * (0 = against, 1 = for, 2 = abstain). Engine builds; wallet signs.
+ */
+export async function governanceVote(
+  c: WalletChain,
+  opportunityId: string,
+  proposalId: string,
+  support: 0 | 1 | 2
+): Promise<string> {
+  const tx = await api.governanceVoteCalldata({ opportunity: opportunityId, proposal_id: proposalId.trim(), support });
+  requireNetwork(c, tx.network);
+  return signAndBroadcast(c, tx.to as Address, tx.data as `0x${string}`, 0n);
+}
+
+/** Live voting power + token balance for a governance entry. */
+export async function governancePower(opportunityId: string, address: string) {
+  return api.governancePower(opportunityId, address);
+}
+
+/** Registry: what can this wallet earn, on which networks. */
+export async function earnOpportunities(): Promise<EarnOpportunity[]> {
+  const sheet = await api.earnOpportunities();
+  return sheet.opportunities;
+}
+
+/** Live receipt-token positions for the wallet on one network. */
+export async function earnPositions(network: string, address: string) {
+  return api.earnPositions(network, address);
+}
+
+export type { EarnOpportunity };

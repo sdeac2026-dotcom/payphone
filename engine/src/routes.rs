@@ -1812,6 +1812,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(crate::connectors::router())
         // PayPal bridge — verify the owner's own PayPal REST credentials.
         .merge(crate::paypal::router())
+        // Earn — staking, lending and governance for the self-custody wallet.
+        .merge(crate::earn::router())
         .fallback(not_found)
         .with_state(state)
 }

@@ -452,6 +452,95 @@ try:
 except Exception as e:
     check("webhook verify with empty secret -> controlled 400", False, repr(e))
 
+# 13. earn & governance — the wallet as an earning, governing participant.
+#     The registry must serve only verified-shape contracts, the calldata
+#     builders must match the reference ABI encodings exactly, and the live
+#     reads must reach Ethereum mainnet through the RPC mesh.
+print("\n[13] earn & governance checks")
+try:
+    code, body = get("/api/v1/earn/opportunities", timeout=20)
+    data = (json.loads(body).get("data") or {}) if isinstance(body, (bytes, bytearray)) else (body.get("data") or {})
+    opps = data.get("opportunities") or []
+    ids = {o.get("id") for o in opps}
+    check("earn registry serves entries with honest yield policy (no APY fields)",
+          code == 200 and len(opps) >= 5 and "yield_policy" in data
+          and all("apy" not in o for o in opps),
+          f"code={code} count={len(opps)}")
+    check("registry: active entries carry verified-shape contracts, roadmap entries none",
+          all(
+              (o["status"] == "active") == (bool(o.get("target_contract")) or bool(o.get("token_contract")))
+              for o in opps if o.get("execution") != "positions_only"
+          ) and all(not o.get("target_contract") for o in opps if o.get("status") == "roadmap"),
+          json.dumps([o["id"] for o in opps])[:140])
+    check("registry: Lido stETH + Uniswap governor present (default set)",
+          "lido-steth-ethereum" in ids and "uni-governance" in ids, f"ids={sorted(ids)[:8]}")
+except Exception as e:
+    check("earn registry serves entries with honest yield policy (no APY fields)", False, repr(e))
+    check("registry: active entries carry verified-shape contracts, roadmap entries none", False, repr(e))
+    check("registry: Lido stETH + Uniswap governor present (default set)", False, repr(e))
+
+try:
+    code, body = post("/api/v1/governance/vote-calldata",
+                      {"opportunity": "uni-governance", "proposal_id": "45", "support": 1}, timeout=20)
+    data = body.get("data") or {}
+    # castVote(45, 1) selector + args — independently verified with viem.
+    expected = ("0x56781388"
+                "000000000000000000000000000000000000000000000000000000000000002d"
+                "0000000000000000000000000000000000000000000000000000000000000001")
+    check("vote calldata matches the reference encoding (castVote(45,for) on GovernorBravo)",
+          code == 200 and data.get("data") == expected
+          and data.get("to", "").lower() == "0x408ed6354d4973f66138c91495f2f2fcbd8724c3"
+          and data.get("chain_id") == 1,
+          f"code={code} data={data.get('data', '')[:24]}… to={data.get('to')}")
+except Exception as e:
+    check("vote calldata matches the reference encoding (castVote(45,for) on GovernorBravo)", False, repr(e))
+
+try:
+    code, body = post("/api/v1/governance/vote-calldata",
+                      {"opportunity": "uni-governance", "proposal_id": "45", "support": 9}, timeout=20)
+    check("vote support outside 0..2 -> controlled 400",
+          code == 400, f"code={code} {json.dumps(body)[:120]}")
+except Exception as e:
+    check("vote support outside 0..2 -> controlled 400", False, repr(e))
+
+try:
+    code, body = post("/api/v1/governance/delegate-calldata",
+                      {"opportunity": "uni-governance",
+                       "delegatee": "0x6c3eA90364068520032917BaeA2B6b7dD45a1C53"}, timeout=20)
+    data = body.get("data") or {}
+    expected = "0x5c19a95c" + "0" * 24 + "6c3ea90364068520032917baea2b6b7dd45a1c53"
+    check("delegate calldata targets the UNI token with the reference encoding",
+          code == 200 and data.get("to", "").lower() == "0x1f9840a85d5af5bf1d1762f925bdaddc4201f984"
+          and data.get("data") == expected,
+          f"code={code} to={data.get('to')} data={data.get('data', '')[:20]}…")
+except Exception as e:
+    check("delegate calldata targets the UNI token with the reference encoding", False, repr(e))
+
+def _uni_power_read():
+    # urlopen raises on 4xx/5xx — normalize to (code, parsed) and retry the
+    # free-RPC flap (honest 502 upstream degradation) once before failing.
+    for attempt in (1, 2):
+        try:
+            code, body = get("/api/v1/governance/power?opportunity=uni-governance"
+                             "&address=0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045", timeout=60)
+            data = (json.loads(body).get("data") or {}) if isinstance(body, (bytes, bytearray)) else (body.get("data") or {})
+            return code, data
+        except urllib.error.HTTPError as e:
+            try:
+                err = json.loads(e.read()).get("error") or {}
+            except Exception:
+                err = {}
+            if e.code in (502, 503) and attempt == 1:
+                time.sleep(2)
+                continue
+            return e.code, err
+    return 0, {}
+
+_vcode, _vdata = _uni_power_read()
+check("voting power read reaches Ethereum (votes + votes_raw in shape)",
+      _vcode == 200 and "votes" in _vdata and "votes_raw" in _vdata,
+      f"code={_vcode} keys={sorted(_vdata)[:6]} msg={str(_vdata.get('message', ''))[:90]}")
+
 print()
 print(f"RESULT: {len(passed)} passed, {len(failed)} failed")
 if failed:

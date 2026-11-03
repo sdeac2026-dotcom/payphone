@@ -41,6 +41,14 @@ wallets — 7 EVM mainnets + Bitcoin + Solana + Tron.
   Create yours in the dashboard's **Connectors** tab or `POST
   /v1/connectors`. Own a PayPal account too? The **PayPal** tab verifies
   your REST keys live and walks the USD → PYUSD → your-wallet bridge.
+- **Hold a balance?** **Earn & Governance** puts the wallet to work:
+  stake ETH with Lido (delegated to a validator set — the validator reward
+  rate, no 32-ETH minimum, no server), supply USDC to Aave V3 for lending
+  interest, and delegate + cast votes in on-chain governance — all as
+  transactions YOUR wallet signs locally, never custodied. Curated
+  registry with contract addresses verified against the protocols' own
+  docs; no invented APYs, risks stated on every entry.
+  Guide: [`docs/EARN.md`](docs/EARN.md).
 - **Just exploring?** Try the [in-browser demo](https://sdeac2026-dotcom.github.io/payphone/)
   (SimNet toy chain, nothing real moves) or deploy your own node below.
 
@@ -110,7 +118,7 @@ Payer ──▶ PayPhone checkout (QR / link / phone number)
 ├── sdks/
 │   ├── typescript/    @payphone/sdk — zero-dependency client + examples
 │   └── python/        payphone — requests-based client + examples
-├── docs/              API reference · security · deployment · revenue
+├── docs/              API reference · earn guide · security · deployment · revenue
 └── scripts/           supervisor · keeper · integration tests · preview shim
 ```
 

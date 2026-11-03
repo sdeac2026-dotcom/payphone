@@ -499,7 +499,10 @@ export async function guardianRestore(
   return envelope.kind === "key" ? walletImportPrivateKey(secret, newPass) : walletImportMnemonic(secret, newPass);
 }
 
-function clients(c: WalletChain) {
+/** viem clients for the unlocked keystore account — shared by wallet flows
+ * (send) and earn flows (stake / supply / governance) so gas + signing
+ * behavior stays identical everywhere. */
+export function clients(c: WalletChain) {
   const transport = http(c.rpc);
   const publicClient = createPublicClient({ chain: c.chain, transport });
   const walletClient = createWalletClient({ chain: c.chain, transport, account: requireAccount() });
