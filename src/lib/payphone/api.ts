@@ -171,6 +171,53 @@ export function getAdminToken(): string | null {
   }
 }
 
+/** Fetch with cold-start recovery. Free-tier engines SLEEP when idle, and the
+ * first request after a nap can hang for up to a minute or die mid-handshake —
+ * without recovery, every visitor after an idle window sees "cannot fetch
+ * balance" and empty panels. GETs recover fully: retries on connection-level
+ * failures, on the request timing out, and on gateway blips (502/503/504 —
+ * the proxy answering while the container boots). State-changing POSTs get
+ * ONE recovery retry and only when the request provably never landed
+ * (connection error) — never after an HTTP answer, so nothing is minted or
+ * rotated twice. The engine's own 4xx/5xx answers are real answers and are
+ * always surfaced as-is. */
+const WAKE_TIMEOUT_MS = 45_000; // first attempt must survive an engine cold start
+const RETRY_TIMEOUT_MS = 20_000; // engine is warm by now
+const RETRY_DELAYS_MS = [1_500, 4_000];
+
+async function resilientFetch(url: string, method: string, init: RequestInit): Promise<Response> {
+  const idempotent = method === "GET" || method === "HEAD";
+  const attempts = idempotent ? 3 : 2;
+  let lastError: Error = new ApiError("engine_unreachable", "engine unreachable", 0);
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const resp = await fetch(url, {
+        ...init,
+        cache: "no-store",
+        signal: AbortSignal.timeout(i === 0 ? WAKE_TIMEOUT_MS : RETRY_TIMEOUT_MS),
+      });
+      const gatewayBlip =
+        (resp.status === 502 || resp.status === 503 || resp.status === 504) && i < attempts - 1;
+      if (gatewayBlip) {
+        lastError = new ApiError("engine_waking", `engine returned ${resp.status} (waking or restarting)`, resp.status);
+        await new Promise((r) => setTimeout(r, RETRY_DELAYS_MS[Math.min(i, RETRY_DELAYS_MS.length - 1)]));
+        continue;
+      }
+      return resp;
+    } catch (e) {
+      lastError = e instanceof Error ? e : new Error(String(e));
+      const neverLanded = e instanceof TypeError; // connection refused/reset/dropped
+      if (i < attempts - 1 && (idempotent || neverLanded)) {
+        await new Promise((r) => setTimeout(r, RETRY_DELAYS_MS[Math.min(i, RETRY_DELAYS_MS.length - 1)]));
+        continue;
+      }
+    }
+  }
+  const waking =
+    "The PayPhone engine is unreachable right now. On the free hosting tier it sleeps when idle and needs up to a minute to wake — try again in a moment.";
+  throw new ApiError("engine_unreachable", waking, 0);
+}
+
 async function request<T>(
   method: string,
   path: string,
@@ -192,11 +239,10 @@ async function request<T>(
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (extraHeaders) Object.assign(headers, extraHeaders);
   if (creds) Object.assign(headers, await signRequest(method, enginePath, raw, creds));
-  const resp = await fetch(transportPath(wirePath), {
+  const resp = await resilientFetch(transportPath(wirePath), method, {
     method,
     headers,
     body: raw ?? undefined,
-    cache: "no-store",
   });
   return unwrap<T>(resp);
 }
