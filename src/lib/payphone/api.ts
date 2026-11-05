@@ -252,6 +252,28 @@ async function request<T>(
 export const api = {
   engineHealth: () => request<EngineHealth>("GET", "/health").catch(() => null),
 
+  /** Server-side balance sheet — native + settleable tokens for one address
+   * on one network, read from the engine's own RPC pool (no CORS, no mobile
+   * radio, pooled failover). `skipped` lists per-asset read failures. */
+  walletBalances: (address: string, network: string) =>
+    request<{
+      address: string;
+      network: string;
+      native_symbol: string;
+      explorer: string;
+      balances: {
+        symbol: string;
+        decimals: number;
+        kind: "native" | "erc20";
+        address: string | null;
+        qty: string;
+        qty_base: string;
+      }[];
+      skipped: { asset: string; note: string }[];
+      measured_at: number;
+      cache: "hit" | "miss";
+    }>("GET", `/wallet/${encodeURIComponent(address)}/balances?network=${encodeURIComponent(network)}`),
+
   /** Live multi-network capability sheet (real mainnets + demo simnet). */
   chains: () =>
     request<{

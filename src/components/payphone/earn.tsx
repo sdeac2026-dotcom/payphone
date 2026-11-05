@@ -20,7 +20,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
 import {
-  AlertTriangle, ArrowRightLeft, CheckCircle2, ExternalLink, Loader2, ShieldCheck, Vote,
+  AlertTriangle, ArrowRightLeft, CheckCircle2, ExternalLink, Loader2, RefreshCw, ShieldCheck, Vote,
 } from "lucide-react";
 import {
   earnOpportunities, earnPositions, governanceDelegate, governancePower, governanceVote,
@@ -52,6 +52,7 @@ export function EarnPanel({ chain, onChanged }: { chain: WalletChain; onChanged:
   const { toast } = useToast();
   const addr = walletAddress() ?? "";
   const [opps, setOpps] = useState<EarnOpportunity[] | null>(null);
+  const [oppsError, setOppsError] = useState<string | null>(null);
   const [demoMode, setDemoMode] = useState(false);
   const [positions, setPositions] = useState<EarnPosition[] | null>(null);
   const [native, setNative] = useState<string | null>(null);
@@ -67,19 +68,22 @@ export function EarnPanel({ chain, onChanged }: { chain: WalletChain; onChanged:
   const [support, setSupport] = useState<"0" | "1" | "2">("1");
   const [power, setPower] = useState<PowerSheet | null>(null);
 
-  useEffect(() => {
-    let live = true;
-    (async () => {
-      try {
-        const list = await earnOpportunities();
-        if (live) setOpps(list);
-      } catch (e) {
-        if (live && e instanceof ApiError && e.type === "demo_error") setDemoMode(true);
-        else if (live) setOpps([]);
-      }
-    })();
-    return () => { live = false; };
+  // Registry load as a RETRYABLE action. The old fire-once effect turned one
+  // failed fetch (engine asleep, blip) into a permanently hollow panel — no
+  // actions, no reason, no way back. Now a failure renders an honest reason
+  // with a Try again button, so the earn entry point is never a dead card.
+  const loadOpps = useCallback(async () => {
+    setOpps(null);
+    setOppsError(null);
+    try {
+      setOpps(await earnOpportunities());
+    } catch (e) {
+      if (e instanceof ApiError && e.type === "demo_error") setDemoMode(true);
+      else setOppsError(String((e as Error).message ?? e));
+    }
   }, []);
+
+  useEffect(() => { void loadOpps(); }, [loadOpps]);
 
   const loadPositions = useCallback(async () => {
     if (!addr) return;
@@ -232,7 +236,25 @@ export function EarnPanel({ chain, onChanged }: { chain: WalletChain; onChanged:
           </p>
         )}
 
-        {opps === null && !demoMode && <p className="text-sm text-muted-foreground">Reading the earn registry…</p>}
+{opps === null && oppsError === null && !demoMode && (
+          <p className="text-sm text-muted-foreground">Reading the earn registry…</p>
+        )}
+
+        {oppsError !== null && (
+          <div className="space-y-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2.5">
+            <p className="text-sm font-medium text-destructive">Couldn't load the earn registry.</p>
+            <p className="text-xs text-muted-foreground">{oppsError}</p>
+            <Button size="sm" variant="outline" onClick={() => void loadOpps()}>
+              <RefreshCw className="mr-1.5 h-3.5 w-3.5" /> Try again
+            </Button>
+          </div>
+        )}
+
+        {opps !== null && opps.length === 0 && oppsError === null && !demoMode && (
+          <p className="text-sm text-muted-foreground">
+            No earning opportunities are listed right now — check back soon.
+          </p>
+        )}
 
         {activeFlow.map((o) => (
           <div key={o.id} className="space-y-2 rounded-md border p-3">

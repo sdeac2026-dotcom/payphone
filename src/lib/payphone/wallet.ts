@@ -48,6 +48,7 @@ import {
   avalanche,
   base,
   bsc,
+  mainnet,
   optimism,
   polygon,
   worldchain,
@@ -79,6 +80,17 @@ export const WALLET_CHAINS: WalletChain[] = [
     fallbacks: [],
     native: "ETH",
     explorer: "https://worldscan.org",
+  },
+  {
+    name: "ethereum",
+    label: "Ethereum",
+    chain: mainnet,
+    // CORS-verified from a browser origin (2026-11 audit): all three answer
+    // preflight + actual POST with Access-Control-Allow-Origin.
+    rpc: "https://ethereum-rpc.publicnode.com",
+    fallbacks: ["https://eth.drpc.org", "https://1rpc.io/eth"],
+    native: "ETH",
+    explorer: "https://etherscan.io",
   },
   {
     name: "base",
@@ -534,8 +546,30 @@ export interface TokenBalance {
   address?: string; // undefined = native
 }
 
+/**
+ * Balance sheet for the unlocked account. Reads go through the ENGINE first
+ * (GET /v1/wallet/:address/balances — server-side RPC pool, no CORS, no
+ * mobile-radio flakiness) and fall back to direct browser RPC reads only if
+ * the engine answer is unreachable. The engine's sheet is also strictly
+ * BETTER: it covers every settleable token the registry knows, not just the
+ * ones the console guessed at, and per-asset failures degrade to the
+ * engine's `skipped` list instead of killing the whole read.
+ */
 export async function walletBalances(c: WalletChain): Promise<TokenBalance[]> {
   const account = requireAccount();
+  try {
+    const sheet = await api.walletBalances(account.address, c.name);
+    return sheet.balances.map((b) => ({
+      symbol: b.symbol,
+      decimals: b.decimals,
+      balance: b.qty,
+      address: b.address ?? undefined,
+    }));
+  } catch {
+    /* engine unreachable or unhappy — browser RPC path below still gives
+     * the user native + token balances (this is the path that survived
+     * before the engine endpoint existed) */
+  }
   const { publicClient } = clients(c);
   const out: TokenBalance[] = [];
   const native = await publicClient.getBalance({ address: account.address });

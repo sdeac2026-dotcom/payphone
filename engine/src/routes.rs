@@ -1480,6 +1480,29 @@ async fn wallet_activity_all(State(state): Ctx, Path(address): Path<String>, Que
     Ok(ok(payload))
 }
 
+/// `GET /v1/wallet/:address/balances?network=<name>` — PUBLIC server-side
+/// balance sheet: native + every settleable token on one network, read from
+/// the engine's own RPC pool. The console's wallet used to read balances
+/// from the browser (viem direct to public RPCs); a phone on a weak radio
+/// or one throttled gateway turned that into "no balances readable" with no
+/// recovery. Server-side reads remove that whole failure class. `network`
+/// defaults to worldchain — the flagship chain of the phone-number loop.
+async fn wallet_balances(State(state): Ctx, Path(address): Path<String>, Query(q): Query<BalancesQuery>) -> ApiResult<Response> {
+    guard(&state, &format!("wallet-balances:{}", address.to_lowercase()))?;
+    let evm = state
+        .evm
+        .as_ref()
+        .ok_or_else(|| AppError::unavailable("no EVM RPC configured"))?;
+    let network = q.network.as_deref().unwrap_or("worldchain").trim().to_lowercase();
+    let payload = evm.address_balances(&address, &network).await?;
+    Ok(ok(payload))
+}
+
+#[derive(Deserialize)]
+struct BalancesQuery {
+    network: Option<String>,
+}
+
 #[derive(Deserialize)]
 struct RegisterReq {
     phone: String,
@@ -1803,6 +1826,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/wallet/recovery/claim", post(guardian_claim))
         .route("/v1/wallet/activity", get(wallet_activity))
         .route("/v1/wallet/:address/activity", get(wallet_activity_all))
+        .route("/v1/wallet/:address/balances", get(wallet_balances))
         .route("/v1/webhooks/test", post(test_webhook))
         .route("/v1/webhooks/verify", post(verify_webhook))
         .route("/v1/simnet/blocks", get(simnet_blocks))

@@ -29,7 +29,7 @@ import { useToast } from "@/hooks/use-toast";
 import {
   AlertTriangle, ArrowDownToLine, ArrowRightLeft, CheckCircle2, Copy, Eye, ExternalLink,
   FileDown, FileUp, KeyRound, LifeBuoy, Loader2, Lock, Phone, Plus, RefreshCw, Send,
-  ShieldCheck, Trash2, Wallet as WalletIcon,
+  ShieldCheck, Sprout, Trash2, Wallet as WalletIcon,
 } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
 import { SendRightNotice } from "./asset-safety";
@@ -622,16 +622,29 @@ function WalletMain({ prefill, onChanged }: { prefill?: WalletPrefill; onChanged
 
   const tokens = useMemo(() => balances ?? [], [balances]);
 
+  const [balanceError, setBalanceError] = useState<string | null>(null);
+
+  // Auto-retry with backoff, then STOP RETRYING and say so IN the balances
+  // card. The old one-shot load left a transient failure (mobile radio, cold
+  // engine, throttled RPC) painted as a permanent "no balances" state with no
+  // way back except remount — the single worst thing a wallet can say.
   const loadBalances = useCallback(async () => {
     setBalances(null);
-    try {
-      const b = await walletBalances(chain);
-      setBalances(b);
-    } catch (e) {
-      toast({ title: "Balance fetch failed", description: String((e as Error).message ?? e), variant: "destructive" });
-      setBalances([]);
+    setBalanceError(null);
+    const delays = [1_500, 4_000];
+    for (let attempt = 0; ; attempt++) {
+      try {
+        setBalances(await walletBalances(chain));
+        return;
+      } catch (e) {
+        if (attempt >= delays.length) {
+          setBalanceError(String((e as Error).message ?? e));
+          return;
+        }
+        await new Promise((r) => setTimeout(r, delays[attempt]));
+      }
     }
-  }, [chain, toast]);
+  }, [chain]);
 
   useEffect(() => { loadBalances(); }, [loadBalances]);
   useEffect(() => { setActivity(activityLog()); }, []);
@@ -799,6 +812,9 @@ function WalletMain({ prefill, onChanged }: { prefill?: WalletPrefill; onChanged
               <Button size="sm" variant="outline" onClick={() => window.open(`${chain.explorer}/address/${addr}`, "_blank")}>
                 <ExternalLink className="mr-1.5 h-3.5 w-3.5" /> {chain.label} explorer
               </Button>
+              <Button size="sm" variant="default" className="bg-emerald-600 hover:bg-emerald-700 text-white" onClick={() => document.getElementById("wallet-earn")?.scrollIntoView({ behavior: "smooth", block: "start" })}>
+                <Sprout className="mr-1.5 h-3.5 w-3.5" /> Start earning
+              </Button>
               <span className="flex-1" />
               <Button size="sm" variant="ghost" onClick={() => { walletLock(); onChanged(); }}><Lock className="mr-1.5 h-3.5 w-3.5" /> Lock</Button>
             </div>
@@ -808,7 +824,9 @@ function WalletMain({ prefill, onChanged }: { prefill?: WalletPrefill; onChanged
       </Card>
 
       {/* earn & governance — stake, lend, vote; same local keystore signing */}
-      <EarnPanel chain={chain} onChanged={loadBalances} />
+      <div id="wallet-earn" className="scroll-mt-4">
+        <EarnPanel chain={chain} onChanged={loadBalances} />
+      </div>
 
       <div className="grid gap-6 lg:grid-cols-2">
         {/* balances */}
@@ -821,8 +839,17 @@ function WalletMain({ prefill, onChanged }: { prefill?: WalletPrefill; onChanged
             </Select>
           </CardHeader>
           <CardContent className="space-y-2">
-            {balances === null && <p className="text-sm text-muted-foreground">Reading {chain.label}…</p>}
-            {balances?.length === 0 && <p className="text-sm text-muted-foreground">No balances readable right now.</p>}
+            {balances === null && balanceError === null && <p className="text-sm text-muted-foreground">Reading {chain.label}…</p>}
+            {balanceError !== null && (
+              <div className="space-y-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2.5">
+                <p className="text-sm font-medium text-destructive">Couldn't read balances on {chain.label}.</p>
+                <p className="text-xs text-muted-foreground">{balanceError}</p>
+                <Button size="sm" variant="outline" onClick={() => void loadBalances()}>
+                  <RefreshCw className="mr-1.5 h-3.5 w-3.5" /> Try again
+                </Button>
+              </div>
+            )}
+            {!balanceError && balances?.length === 0 && <p className="text-sm text-muted-foreground">No balances readable right now.</p>}
             {balances && balances.length > 0 && (
               <div className="space-y-1.5">
                 {balances.map((b) => (

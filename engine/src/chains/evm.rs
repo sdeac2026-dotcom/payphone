@@ -69,6 +69,10 @@ pub const MAX_ACTIVITY_WINDOW: u64 = 20_000;
 /// of re-fanning-out every time — sustained re-scanning is exactly the
 /// gateway pressure that slows scans down for everyone).
 const ACTIVITY_CACHE_TTL: Duration = Duration::from_secs(15);
+/// Balance reads cache for a breath, not a minute — a send followed by a
+/// refresh must show the new balance, but mount+refresh double-fetches
+/// should share one chain read. Shares the activity cache map (`bal|` keys).
+const BALANCE_CACHE_TTL: Duration = Duration::from_secs(8);
 
 /// Which transfers an activity scan returns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1159,6 +1163,137 @@ impl EvmAdapter {
         }
         Ok(payload)
     }
+
+    /// Server-side wallet balances — ONE network, native + every settleable
+    /// token, each read straight from the engine's RPC pool with its own
+    /// failover.
+    ///
+    /// The console used to read balances from the BROWSER via viem. That
+    /// works until it doesn't: a phone on a flaky radio, a throttled public
+    /// gateway, one hiccup — and the wallet shows "no balances readable"
+    /// with no recovery until remount. Reading server-side removes the
+    /// whole failure class (no CORS, no mobile radio, pooled RPCs) and
+    /// gives every client one authoritative answer. Per-asset failures are
+    /// captured in `skipped` — one bad token read never blanks the sheet.
+    pub async fn address_balances(
+        &self,
+        address: &str,
+        network: &str,
+    ) -> ApiResult<serde_json::Value> {
+        let spec = registry::find(network).ok_or_else(|| {
+            AppError::bad_request(format!(
+                "unknown network '{network}' — EVM networks: {}",
+                self.networks().join(", ")
+            ))
+        })?;
+        if !self.has_network(network) {
+            return Err(AppError::unavailable(format!(
+                "network '{network}' is known but has no RPC configured"
+            )));
+        }
+        let (addr, _) = Self::normalize_address(address)?;
+
+        let cache_key = format!("bal|{network}|{addr}");
+        if let Some((at, payload)) = self
+            .activity_cache
+            .lock()
+            .expect("activity cache lock")
+            .get(&cache_key)
+        {
+            if at.elapsed() < BALANCE_CACHE_TTL {
+                let mut v = payload.clone();
+                v["cache"] = json!("hit");
+                return Ok(v);
+            }
+        }
+
+        // Native + all settleable tokens concurrently — a slow gateway on
+        // one token cannot stall the sheet (each read rides the pool's own
+        // failover internally). Each handle carries its own asset metadata
+        // so a failed read never shifts another row's identity.
+        struct Read {
+            symbol: String,
+            decimals: u8,
+            kind: &'static str,
+            address: Option<String>,
+        }
+        let mut handles: Vec<(Read, tokio::task::JoinHandle<ApiResult<u128>>)> = Vec::new();
+        {
+            let adapter = self.clone();
+            let net = network.to_string();
+            let addr = addr.clone();
+            handles.push((
+                Read {
+                    symbol: spec.native.to_string(),
+                    decimals: 18, // every registry native (ETH/BNB/AVAX/MATIC/POL/WLD) is an 18-decimal EVM native
+                    kind: "native",
+                    address: None,
+                },
+                tokio::spawn(async move { adapter.balance(&net, &addr, None).await }),
+            ));
+        }
+        for t in spec.tokens {
+            let adapter = self.clone();
+            let net = network.to_string();
+            let addr = addr.clone();
+            let erc20 = Erc20 {
+                address: t.address.to_string(),
+                decimals: t.decimals,
+            };
+            handles.push((
+                Read {
+                    symbol: t.symbol.to_string(),
+                    decimals: t.decimals,
+                    kind: "erc20",
+                    address: Some(t.address.to_string()),
+                },
+                tokio::spawn(async move { adapter.balance(&net, &addr, Some(&erc20)).await }),
+            ));
+        }
+
+        let mut balances: Vec<serde_json::Value> = Vec::new();
+        let mut skipped: Vec<serde_json::Value> = Vec::new();
+        for (meta, h) in handles.into_iter() {
+            match h.await {
+                Ok(Ok(qty)) => balances.push(json!({
+                    "symbol": meta.symbol,
+                    "decimals": meta.decimals,
+                    "kind": meta.kind,
+                    "address": meta.address,
+                    "qty": base_units_to_decimal(qty, meta.decimals),
+                    "qty_base": qty.to_string(),
+                })),
+                Ok(Err(e)) => skipped.push(json!({ "asset": meta.symbol, "note": e.message })),
+                Err(e) => skipped.push(json!({ "asset": meta.symbol, "note": format!("task join failed: {e}") })),
+            }
+        }
+        if balances.is_empty() {
+            // Every read failed — that is an upstream outage, not "zero
+            // balance"; surface it so the client can retry meaningfully.
+            return Err(AppError::upstream(
+                "every balance read failed on this network — the RPC pool is unhappy right now",
+            ));
+        }
+
+        let payload = json!({
+            "address": addr,
+            "network": network,
+            "native_symbol": spec.native,
+            "explorer": spec.explorer_tx,
+            "balances": balances,
+            "skipped": skipped,
+            "measured_at": now_unix(),
+            "cache": "miss",
+        });
+        {
+            let mut cache = self.activity_cache.lock().expect("activity cache lock");
+            if cache.len() > 256 {
+                cache.retain(|_, (at, _)| at.elapsed() < ACTIVITY_CACHE_TTL);
+            }
+            cache.insert(cache_key, (Instant::now(), payload.clone()));
+        }
+        Ok(payload)
+    }
 }
 
 /// Unix seconds (activity timestamps).
@@ -1425,6 +1560,78 @@ mod tests {
         // 40-hex without prefix is still accepted (UIs paste both shapes).
         let (a2, _) = EvmAdapter::normalize_address(&format!("0x{}", "a".repeat(40))).unwrap();
         assert_eq!(a2, format!("0x{}", "a".repeat(40)));
+    }
+
+    #[tokio::test]
+    async fn balances_rejects_unknown_network_without_touching_rpc() {
+        // A dummy pool gives us a live-looking adapter with zero network I/O
+        // on the validation path — the guard must fire before any read.
+        let adapter = EvmAdapter::new(vec![(
+            "base".to_string(),
+            "https://example.invalid".to_string(),
+        )])
+        .expect("dummy adapter");
+        let err = adapter
+            .address_balances("0xA11Ce0000000000000000000000000000000dEaD", "not-a-chain")
+            .await
+            .err()
+            .expect("unknown network must error");
+        assert_eq!(err.err_type, "bad_request");
+        assert!(err.message.contains("not-a-chain"));
+        assert!(err.message.contains("base"), "error must list configured networks");
+    }
+
+    #[tokio::test]
+    async fn balances_rejects_unconfigured_known_network() {
+        // ethereum is in the registry but this adapter has no RPC for it —
+        // that is "unavailable" (a config gap), not "bad request".
+        let adapter = EvmAdapter::new(vec![(
+            "base".to_string(),
+            "https://example.invalid".to_string(),
+        )])
+        .expect("dummy adapter");
+        let err = adapter
+            .address_balances("0xA11Ce0000000000000000000000000000000dEaD", "ethereum")
+            .await
+            .err()
+            .expect("unconfigured network must error");
+        assert_eq!(err.err_type, "unavailable");
+        assert!(err.message.contains("no RPC configured"));
+    }
+
+    #[tokio::test]
+    async fn balances_rejects_malformed_address() {
+        let adapter = EvmAdapter::new(vec![(
+            "base".to_string(),
+            "https://example.invalid".to_string(),
+        )])
+        .expect("dummy adapter");
+        let err = adapter
+            .address_balances("not-an-address", "base")
+            .await
+            .err()
+            .expect("malformed address must error");
+        assert_eq!(err.err_type, "bad_request");
+    }
+
+    #[test]
+    fn balance_row_metadata_survives_failed_siblings() {
+        // The sheet's identity contract: every row carries its own
+        // symbol/decimals/kind, so one failed read can never shift another
+        // row's asset (the bug the index-based v1 had).
+        struct Read {
+            symbol: String,
+            decimals: u8,
+            kind: &'static str,
+            address: Option<String>,
+        }
+        let native = Read { symbol: "ETH".into(), decimals: 18, kind: "native", address: None };
+        let token = Read { symbol: "USDC".into(), decimals: 6, kind: "erc20", address: Some("0xA".into()) };
+        assert_eq!(native.kind, "native");
+        assert_eq!(native.decimals, 18);
+        assert_eq!(token.decimals, 6);
+        assert_eq!(token.address.as_deref(), Some("0xA"));
+        assert_eq!(base_units_to_decimal(1_500_000, 6), "1.500000");
     }
 
     // ------------------------------------------------------------ rpc mesh --
