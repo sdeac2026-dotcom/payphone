@@ -56,6 +56,26 @@ function short(a: string): string {
   return a.length > 15 ? `${a.slice(0, 8)}…${a.slice(-6)}` : a;
 }
 
+/**
+ * Address-poisoning detector: scammers generate vanity addresses that share
+ * a LONG PREFIX and SUFFIX with a victim's address (0x65d8…455f vs
+ * 0x65d8…455f-style twins), then seed the victim's transaction history with
+ * dust from the twin. When the victim later copies "their" address from a
+ * history row — instead of the Receive screen — they send funds to the
+ * attacker. A shared 4+ hex prefix AND 4+ hex suffix is essentially never
+ * coincidental (probability ~2^-32) and always worth a hard warning.
+ */
+export function looksLikePoisoning(own: string, candidate: string): boolean {
+  const a = (own ?? "").trim().toLowerCase();
+  const b = (candidate ?? "").trim().toLowerCase();
+  if (!/^0x[0-9a-f]{40}$/.test(a) || !/^0x[0-9a-f]{40}$/.test(b) || a === b) return false;
+  let pre = 0;
+  while (pre < 40 && a[2 + pre] === b[2 + pre]) pre++;
+  let suf = 0;
+  while (suf < 40 - pre && a[41 - suf] === b[41 - suf]) suf++;
+  return pre >= 4 && suf >= 4;
+}
+
 /** Network fees live far below everyday decimals — print them honestly. */
 function fmtFee(q: string): string {
   const n = Number(q);
@@ -695,7 +715,11 @@ function WalletMain({ prefill, onChanged }: { prefill?: WalletPrefill; onChanged
     setRadarBusy(true);
     setRadarErr(null);
     try {
-      setRadar(await api.walletActivityAll(addr, { direction: "both" }));
+      // Engine max window: the default 2,000 blocks is barely an hour on
+      // fast OP-stack chains, so deposits a few hours old never surfaced.
+      // 20,000 covers ~11h there and days on slower chains; the engine
+      // clamps and caches, so the cost stays bounded.
+      setRadar(await api.walletActivityAll(addr, { direction: "both", blocks: 20000 }));
       radarRetries.current = 0;
     } catch (e) {
       // Static-demo build (GitHub Pages): the in-browser demo engine has no
@@ -884,6 +908,18 @@ function WalletMain({ prefill, onChanged }: { prefill?: WalletPrefill; onChanged
                     : <><ArrowRightLeft className="h-3.5 w-3.5" /> External address — protocol fee applies</>}
                 </p>
               )}
+              {looksLikePoisoning(addr, to) && (
+                <div className="space-y-1 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2.5">
+                  <p className="flex items-center gap-1.5 text-xs font-medium text-destructive">
+                    <AlertTriangle className="h-3.5 w-3.5" /> This address looks very similar to YOUR wallet address.
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    Scammers plant lookalike twins (same start, same end) in your transaction history hoping you copy
+                    theirs. On-chain sends are irreversible — verify every character and copy the address only from
+                    your Receive screen.
+                  </p>
+                </div>
+              )}
             </div>
             <div className="grid grid-cols-2 gap-2">
               <div className="space-y-1.5">
@@ -1009,7 +1045,14 @@ function WalletMain({ prefill, onChanged }: { prefill?: WalletPrefill; onChanged
                         {isIn ? "+" : "−"}{t.qty} {t.asset ?? short(t.asset_address)}
                       </span>
                       <Badge variant="outline" className="text-[10px] uppercase tracking-wide">{t.network}</Badge>
-                      <span className="text-xs text-muted-foreground">{isIn ? "from" : "to"} {short(t.counterparty)}</span>
+                      <span className="text-xs text-muted-foreground">
+                        {isIn ? "from" : "to"} {short(t.counterparty)}
+                        {looksLikePoisoning(walletAddress() ?? "", t.counterparty) && (
+                          <Badge variant="outline" className="ml-1.5 border-destructive/40 text-destructive" title="This address shares a long start AND end with YOUR wallet — likely a poison twin planted by scammers. Never copy addresses from history.">
+                            <AlertTriangle className="mr-1 h-3 w-3" /> looks like yours
+                          </Badge>
+                        )}
+                      </span>
                     </span>
                     <a
                       className="flex items-center gap-1 text-xs text-primary underline-offset-2 hover:underline"
