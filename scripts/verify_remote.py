@@ -554,6 +554,41 @@ check("voting power read reaches Ethereum (votes + votes_raw in shape)",
       _vcode == 200 and "votes" in _vdata and "votes_raw" in _vdata,
       f"code={_vcode} keys={sorted(_vdata)[:6]} msg={str(_vdata.get('message', ''))[:90]}")
 
+# --- [57] Delegate plan: the earning autopilot's cross-network scan ---------
+# The planner fans out one cached balance sheet per configured network and
+# matches the curated registry. Probe with the well-funded public address:
+# its ETH/UNI/USDC on ethereum must produce executable items (Lido/Uniswap
+# DAO/Aave carry address-verified contracts), and the plan must NEVER invent
+# an item for an asset without a venue.
+def _delegate_plan_read():
+    for attempt in (1, 2):
+        try:
+            code, body = get("/api/v1/delegate/plan?address=0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045", timeout=90)
+            data = (json.loads(body).get("data") or {}) if isinstance(body, (bytes, bytearray)) else (body.get("data") or {})
+            return code, data
+        except urllib.error.HTTPError as e:
+            try:
+                err = json.loads(e.read()).get("error") or {}
+            except Exception:
+                err = {}
+            if e.code in (502, 503) and attempt == 1:
+                time.sleep(2)
+                continue
+            return e.code, err
+    return 0, {}
+
+_dcode, _d = _delegate_plan_read()
+_ids = [str(i.get("id", "")) for i in (_d.get("items") or [])]
+check("delegate plan scans all networks and returns valid shape",
+      _dcode == 200 and len(_d.get("scanned_networks", [])) >= 7
+      and isinstance(_d.get("items"), list) and isinstance(_d.get("idle"), list)
+      and isinstance(_d.get("unlockable"), list),
+      f"code={_dcode} scanned={len(_d.get('scanned_networks', []))} items={len(_ids)} "
+      f"idle={len(_d.get('idle', []))} msg={str(_d.get('message', ''))[:80]}")
+check("delegate plan maps real balances to executable registry items (Lido/UNI/Aave)",
+      "lido-steth-ethereum" in _ids and "uni-governance" in _ids and "aave-v3-supply-ethereum" in _ids,
+      f"item ids={_ids}")
+
 print()
 print(f"RESULT: {len(passed)} passed, {len(failed)} failed")
 if failed:

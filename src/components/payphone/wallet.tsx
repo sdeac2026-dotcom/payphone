@@ -29,7 +29,7 @@ import { useToast } from "@/hooks/use-toast";
 import {
   AlertTriangle, ArrowDownToLine, ArrowRightLeft, CheckCircle2, Copy, Eye, ExternalLink,
   FileDown, FileUp, KeyRound, LifeBuoy, Loader2, Lock, Phone, Plus, RefreshCw, Send,
-  ShieldCheck, Sprout, Trash2, Wallet as WalletIcon,
+  ShieldCheck, Sparkles, Sprout, Trash2, Wallet as WalletIcon,
 } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
 import { SendRightNotice } from "./asset-safety";
@@ -44,6 +44,7 @@ import {
 import { WALLET_SEND_FEE_BPS } from "@/lib/payphone/wallet";
 import { api, ApiError, type WalletActivityAll } from "@/lib/payphone/api";
 import { EarnPanel } from "./earn";
+import { DelegateDialog } from "./delegate-dialog";
 
 export interface WalletPrefill {
   network?: string;
@@ -636,6 +637,7 @@ function WalletMain({ prefill, onChanged }: { prefill?: WalletPrefill; onChanged
   const [radarBusy, setRadarBusy] = useState(false);
   const [radarErr, setRadarErr] = useState<string | null>(null);
   const [reveal, setReveal] = useState<string | null>(null);
+  const [delegateOpen, setDelegateOpen] = useState(false);
   const [revealPass, setRevealPass] = useState("");
   const [guardianOpen, setGuardianOpen] = useState(false);
   const guardian = guardianLocalStatus();
@@ -838,6 +840,9 @@ function WalletMain({ prefill, onChanged }: { prefill?: WalletPrefill; onChanged
               </Button>
               <Button size="sm" variant="default" className="bg-emerald-600 hover:bg-emerald-700 text-white" onClick={() => document.getElementById("wallet-earn")?.scrollIntoView({ behavior: "smooth", block: "start" })}>
                 <Sprout className="mr-1.5 h-3.5 w-3.5" /> Start earning
+              </Button>
+              <Button size="sm" variant="outline" onClick={() => setDelegateOpen(true)}>
+                <Sparkles className="mr-1.5 h-3.5 w-3.5" /> Delegate
               </Button>
               <span className="flex-1" />
               <Button size="sm" variant="ghost" onClick={() => { walletLock(); onChanged(); }}><Lock className="mr-1.5 h-3.5 w-3.5" /> Lock</Button>

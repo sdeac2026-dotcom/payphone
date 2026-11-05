@@ -117,7 +117,8 @@ fn default_votes_fn() -> String {
 }
 
 impl Opportunity {
-    fn is_active(&self) -> bool {
+    /// Visible across modules — the Delegate planner filters on it too.
+    pub(crate) fn is_active(&self) -> bool {
         self.status == "active"
     }
 

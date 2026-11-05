@@ -76,6 +76,39 @@ export interface WalletActivityAll {
   cache: "hit" | "miss";
 }
 
+/** One executable row of the Delegate plan — a registry-verified contract. */
+export interface DelegateItem {
+  id: string;
+  protocol: string;
+  label: string;
+  kind: string;
+  network: string;
+  asset: string;
+  balance_qty: string;
+  gas_ok: boolean;
+  receipt_asset: string;
+  target_contract: string;
+  reward_source: string;
+  risks: string[];
+  steps: string[];
+}
+
+/** Response of `GET /v1/delegate/plan` — the earning autopilot's output. */
+export interface DelegatePlan {
+  address: string;
+  generated_at: number;
+  non_custodial: string;
+  scanned_networks: string[];
+  skipped_networks: { network: string; why: string }[];
+  items: DelegateItem[];
+  idle: { network: string; symbol: string; qty: string; note: string }[];
+  unlockable: {
+    id: string; protocol: string; label: string; network: string;
+    asset: string; why: string; how: string;
+  }[];
+  counts: { items: number; idle: number; unlockable: number };
+}
+
 async function unwrap<T>(resp: Response): Promise<T> {
   const body = await resp.json().catch(() => ({}));
   if (!resp.ok) {
@@ -506,6 +539,17 @@ export const api = {
       `/wallet/${encodeURIComponent(address)}/activity${qs ? `?${qs}` : ""}`
     );
   },
+
+  /**
+   * Delegate plan — the earning autopilot. ONE call scans every configured
+   * network for the address's idle balances, matches the curated earn
+   * registry and returns: executable items (real, address-verified contracts
+   * the wallet signs locally via the Earn helpers), idle assets with no
+   * venue, and the funding rules that unlock the rest. Public read; each
+   * balance sheet is engine-cached, so repeat opens are cheap.
+   */
+  delegatePlan: (address: string) =>
+    request<DelegatePlan>("GET", `/delegate/plan?address=${encodeURIComponent(address)}`),
 
   // --------------------------------------------------------------- simnet ----
 

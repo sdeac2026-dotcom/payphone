@@ -1838,6 +1838,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(crate::paypal::router())
         // Earn — staking, lending and governance for the self-custody wallet.
         .merge(crate::earn::router())
+        // Delegate — the earning autopilot: scans every network for idle
+        // balances, matches the registry, builds the plan the wallet signs.
+        .merge(crate::delegate::router())
         .fallback(not_found)
         .with_state(state)
 }
