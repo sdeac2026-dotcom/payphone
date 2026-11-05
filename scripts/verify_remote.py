@@ -246,6 +246,19 @@ try:
 except Exception as e:
     check("wallet activity feed live (incoming rows + native balance + conf policy)", False, repr(e))
 
+# 8b. server-side balance sheet (native + settleable tokens, one network)
+print("\n[8b] server-side balance sheet (engine RPC reads, no browser needed)")
+try:
+    code, raw = get(f"/api/v1/wallet/{probe}/balances?network=ethereum", timeout=60)
+    body = json.loads(raw).get("data", {})
+    rows = body.get("balances", [])
+    native_ok = rows and rows[0].get("kind") == "native" and rows[0].get("symbol") == "ETH"
+    check("wallet balance sheet live (native row + settleable tokens, per-asset skips only)",
+          code == 200 and bool(rows) and native_ok,
+          f"code={code} rows={len(rows)} skipped={len(body.get('skipped', []))} {json.dumps(rows[:2])[:160]}")
+except Exception as e:
+    check("wallet balance sheet live (native row + settleable tokens, per-asset skips only)", False, repr(e))
+
 # 9. full-visibility activity scan (all networks, both directions)
 print("\n[9] full-visibility activity scan (all networks, both directions)")
 try:
