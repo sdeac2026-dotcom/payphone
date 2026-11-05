@@ -589,6 +589,51 @@ check("delegate plan maps real balances to executable registry items (Lido/UNI/A
       "lido-steth-ethereum" in _ids and "uni-governance" in _ids and "aave-v3-supply-ethereum" in _ids,
       f"item ids={_ids}")
 
+# --- [59][60] TxRelay: engine-side prepare + broadcast validation -----------
+# The earn/send signing path no longer depends on browser gateways: the
+# wallet fetches fees/gas/nonce from the engine mesh and relays the
+# ALREADY-SIGNED blob back through it. Probe prepare read-only (vitalik →
+# vitalik, zero value) and confirm broadcast validation rejects garbage.
+
+def _tx_prepare_probe():
+    body = {
+        "network": "ethereum",
+        "from": "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
+        "to": "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
+        "value": "0x0",
+    }
+    for attempt in (1, 2):
+        try:
+            return post("/api/v1/tx/prepare", body, timeout=90)
+        except urllib.error.HTTPError as e:
+            try:
+                err = json.loads(e.read()).get("error") or {}
+            except Exception:
+                err = {}
+            if e.code in (502, 503) and attempt == 1:
+                time.sleep(2)
+                continue
+            return e.code, err
+        except Exception as e:
+            return 0, {"message": str(e)[:90]}
+    return 0, {}
+
+_pcode, _pbody = _tx_prepare_probe()
+_prep = (_pbody.get("data") or {}) if isinstance(_pbody, dict) else {}
+check("tx prepare returns mesh-read signing numbers (chain_id 1, nonce, fees)",
+      _pcode == 200 and _prep.get("chain_id") == 1
+      and isinstance(_prep.get("nonce"), int) and int(_prep.get("max_fee_per_gas", 0)) > 0,
+      f"code={_pcode} chain_id={_prep.get('chain_id')} nonce={_prep.get('nonce')} "
+      f"max_fee={_prep.get('max_fee_per_gas')} msg={str(_prep.get('message', ''))[:80]}")
+
+def _tx_broadcast_garbage():
+    code, _ = post("/api/v1/tx/broadcast", {"network": "ethereum", "raw_tx": "not-a-tx"}, timeout=30)
+    return code
+
+_bcode = _tx_broadcast_garbage()
+check("tx broadcast rejects garbage blobs before touching the mesh (400)",
+      _bcode == 400, f"code={_bcode}")
+
 print()
 print(f"RESULT: {len(passed)} passed, {len(failed)} failed")
 if failed:

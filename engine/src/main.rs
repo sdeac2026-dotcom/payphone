@@ -24,6 +24,7 @@ mod paypal;
 mod phone;
 mod ratelimit;
 mod routes;
+mod txrelay;
 mod webhooks;
 
 use std::sync::Arc;

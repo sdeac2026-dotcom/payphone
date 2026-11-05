@@ -109,6 +109,27 @@ export interface DelegatePlan {
   counts: { items: number; idle: number; unlockable: number };
 }
 
+/** Request of `POST /v1/tx/prepare` — read-only signing prerequisites. */
+export interface TxPrepareRequest {
+  network: string;
+  from: string;
+  to: string;
+  data?: string;
+  value?: string;
+}
+
+/** Response of `POST /v1/tx/prepare` — mesh-read, ready for LOCAL signing. */
+export interface TxPrepare {
+  network: string;
+  chain_id: number;
+  nonce: number;
+  gas: number;
+  base_fee_per_gas: number;
+  max_priority_fee_per_gas: number;
+  max_fee_per_gas: number;
+  note: string;
+}
+
 async function unwrap<T>(resp: Response): Promise<T> {
   const body = await resp.json().catch(() => ({}));
   if (!resp.ok) {
@@ -550,6 +571,22 @@ export const api = {
    */
   delegatePlan: (address: string) =>
     request<DelegatePlan>("GET", `/delegate/plan?address=${encodeURIComponent(address)}`),
+
+  /**
+   * TxRelay prepare — chain id, pending nonce, gas estimate for the EXACT
+   * calldata, and EIP-1559 fees, all read through the engine's RPC mesh so
+   * a dead browser gateway (1rpc.io "Failed to fetch") can no longer kill
+   * the earn/send flows. Read-only; the signature stays local.
+   */
+  txPrepare: (body: TxPrepareRequest) => request<TxPrepare>("POST", "/tx/prepare", body),
+
+  /**
+   * TxRelay broadcast — relay an ALREADY-SIGNED raw RLP blob through the
+   * mesh. The engine receives bytes it cannot modify or forge; the wallet
+   * made the signature.
+   */
+  txBroadcast: (body: { network: string; raw_tx: string }) =>
+    request<{ hash: string; network: string }>("POST", "/tx/broadcast", body),
 
   // --------------------------------------------------------------- simnet ----
 

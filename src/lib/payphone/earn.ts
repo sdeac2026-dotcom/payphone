@@ -2,10 +2,13 @@
  * PayPhone Earn — the wallet as an earning, governing network participant.
  *
  * Every flow here ends in a transaction signed LOCALLY by the keystore
- * account (the same `clients()` signing path as sends) and broadcast through
- * public RPCs. The engine's role is the registry (verified contract
- * addresses, honest risk notes) and the read models (positions, voting
- * power) — it never holds a key and never custodies an asset.
+ * account. The NETWORK work — fees, gas, nonce, and the broadcast — runs
+ * through the engine's server-side RPC mesh (`/v1/tx/prepare`,
+ * `/v1/tx/broadcast`): a throttled or CORS-blocked browser gateway
+ * (1rpc.io "Failed to fetch" in the field) can no longer kill a stake.
+ * Browser gateways remain only as a fallback. The engine relays
+ * ALREADY-SIGNED blobs it cannot modify — it never holds a key and never
+ * custodies an asset.
  *
  * ABIs below are the exact public signatures of the registered protocols:
  * Lido `submit(address _referral) payable` (docs.lido.fi), wstETH
@@ -23,7 +26,7 @@ import {
   encodeFunctionData,
   type Address,
 } from "viem";
-import { api, type EarnOpportunity } from "./api";
+import { api, ApiError, type EarnOpportunity } from "./api";
 import { clients, gasMessage, type WalletChain } from "./wallet";
 
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as const;
@@ -128,8 +131,60 @@ async function assertGasAffordable(
   if (gas * maxFee > balance) throw new Error(gasMessage(c, c.native));
 }
 
-/** Estimate with the REAL calldata, then sign + broadcast one transaction. */
-async function signAndBroadcast(
+/** Sign LOCALLY with the keystore, broadcast the raw blob via the engine mesh. */
+async function signViaEngine(
+  c: WalletChain,
+  to: Address,
+  data: `0x${string}`,
+  value: bigint
+): Promise<string> {
+  const { walletClient } = clients(c);
+  const account = walletClient.account!;
+  const prep = await api.txPrepare({
+    network: c.name,
+    from: account.address,
+    to,
+    data,
+    value: `0x${value.toString(16)}`,
+  });
+
+  // Affordability from the engine's server-side balance sheet — no browser
+  // RPC. If the sheet itself is unreachable, proceed: the chain enforces
+  // the balance at the mempool anyway.
+  const gasCost = BigInt(prep.gas) * BigInt(prep.max_fee_per_gas);
+  let affordErr: string | null = null;
+  try {
+    const sheet = await api.walletBalances(account.address, c.name);
+    const native = sheet.balances.find((b) => !b.address);
+    if (native) {
+      const balWei = parseUnits(native.qty, native.decimals || 18);
+      if (gasCost > balWei) affordErr = gasMessage(c, c.native);
+    }
+  } catch {
+    /* sheet unreachable — broadcast is still safe */
+  }
+  if (affordErr) throw new Error(affordErr);
+
+  const raw = await walletClient.signTransaction({
+    to,
+    data,
+    value,
+    nonce: prep.nonce,
+    gas: BigInt(prep.gas),
+    maxFeePerGas: BigInt(prep.max_fee_per_gas),
+    maxPriorityFeePerGas: BigInt(prep.max_priority_fee_per_gas),
+    chainId: prep.chain_id,
+  });
+  const { hash } = await api.txBroadcast({ network: c.name, raw_tx: raw });
+  return hash as `0x${string}`;
+}
+
+/**
+ * The legacy path: everything through browser gateways. Kept as the
+ * fallback for the day the engine itself is unreachable — the failure mode
+ * this module originally shipped with, better than a dead button.
+ */
+async function signAndBroadcastBrowser(
   c: WalletChain,
   to: Address,
   data: `0x${string}`,
@@ -152,6 +207,25 @@ async function signAndBroadcast(
   });
 }
 
+/** Estimate with the REAL calldata, then sign + broadcast one transaction. */
+async function signAndBroadcast(
+  c: WalletChain,
+  to: Address,
+  data: `0x${string}`,
+  value: bigint
+): Promise<string> {
+  try {
+    return await signViaEngine(c, to, data, value);
+  } catch (e) {
+    // Engine answers with 4xx are REAL answers (bad network, validation,
+    // rate limit) — surface them. Only an unreachable/unhealthy engine
+    // falls back to the browser-gateway path.
+    const retriable = !(e instanceof ApiError) || e.status >= 500;
+    if (!retriable) throw e;
+    return signAndBroadcastBrowser(c, to, data, value);
+  }
+}
+
 /** Approve an EXACT amount — never an infinite allowance. */
 async function approveExact(
   c: WalletChain,
@@ -159,25 +233,8 @@ async function approveExact(
   spender: Address,
   qty: bigint
 ): Promise<string> {
-  const { publicClient, walletClient } = clients(c);
-  const account = walletClient.account!;
   const data = encodeFunctionData({ abi: erc20Abi, functionName: "approve", args: [spender, qty] });
-  const [gas, fees] = await Promise.all([
-    publicClient.estimateGas({ account, to: token, data }),
-    publicClient.estimateFeesPerGas(),
-  ]);
-  await assertGasAffordable(c, token, data, 0n, fees.maxFeePerGas ?? fees.gasPrice);
-  const nonce = await publicClient.getTransactionCount({ address: account.address, blockTag: "pending" });
-  return walletClient.sendTransaction({
-    to: token,
-    data,
-    gas,
-    nonce,
-    account,
-    chain: c.chain,
-    maxFeePerGas: fees.maxFeePerGas ?? undefined,
-    maxPriorityFeePerGas: fees.maxPriorityFeePerGas ?? undefined,
-  });
+  return signAndBroadcast(c, token, data, 0n);
 }
 
 /** Resolve a token address + decimals from the engine's live chain sheet. */

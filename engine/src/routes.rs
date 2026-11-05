@@ -1841,6 +1841,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         // Delegate — the earning autopilot: scans every network for idle
         // balances, matches the registry, builds the plan the wallet signs.
         .merge(crate::delegate::router())
+        // TxRelay — prepare/broadcast for transactions the WALLET signs;
+        // the mesh replaces the flaky browser-gateway path.
+        .merge(crate::txrelay::router())
         .fallback(not_found)
         .with_state(state)
 }

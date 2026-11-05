@@ -547,6 +547,107 @@ impl EvmAdapter {
             .ok_or_else(|| AppError::upstream("bad blockNumber"))
     }
 
+    /// Prepare one outbound transaction — chain id, pending nonce, gas
+    /// estimate for the EXACT calldata, and EIP-1559 fees. Every read rides
+    /// the mesh, so a dead browser gateway can no longer kill the earn/send
+    /// flows the way a throttled 1rpc.io did ("Failed to fetch" at the
+    /// wallet). Read-only: nothing here moves funds.
+    pub async fn tx_prepare(
+        &self,
+        network: &str,
+        from: &str,
+        to: &str,
+        data: Option<&str>,
+        value: Option<&str>,
+    ) -> ApiResult<serde_json::Value> {
+        if !self.has_network(network) {
+            return Err(AppError::unavailable(format!(
+                "network '{network}' is known but has no RPC configured"
+            )));
+        }
+        let (from, _) = Self::normalize_address(from)?;
+        let (to, _) = Self::normalize_address(to)?;
+        let data = data.filter(|d| !d.is_empty()).unwrap_or("0x").to_string();
+        let value = value.filter(|v| !v.is_empty()).unwrap_or("0x0").to_string();
+
+        let chain_id = self.chain_id(network).await?;
+        let nonce_res = self
+            .rpc(network, "eth_getTransactionCount", json!([from, "pending"]))
+            .await?;
+        let nonce = nonce_res
+            .as_str()
+            .and_then(parse_hex_quantity)
+            .ok_or_else(|| AppError::upstream("eth_getTransactionCount returned a non-quantity"))?;
+        let gas_res = self
+            .rpc(
+                network,
+                "eth_estimateGas",
+                json!([{ "from": from, "to": to, "data": data, "value": value }]),
+            )
+            .await?;
+        let gas = gas_res
+            .as_str()
+            .and_then(parse_hex_quantity)
+            .ok_or_else(|| AppError::upstream("eth_estimateGas returned a non-quantity"))?;
+
+        // EIP-1559 fees: base fee from feeHistory (fall back to a sane 1.5
+        // gwei when a chain doesn't expose it), priority from
+        // eth_maxPriorityFeePerGas, max = 2×base + priority (standard
+        // headroom so the tx survives a couple of base-fee upticks).
+        let base_fee = match self
+            .rpc(network, "eth_feeHistory", json!(["0x1", "latest", []]))
+            .await
+        {
+            Ok(v) => v
+                .get("baseFeePerGas")
+                .and_then(|b| b.as_array())
+                .and_then(|a| a.last())
+                .and_then(|s| s.as_str())
+                .and_then(parse_hex_quantity)
+                .unwrap_or(1_500_000_000),
+            Err(_) => 1_500_000_000,
+        };
+        let priority = match self
+            .rpc(network, "eth_maxPriorityFeePerGas", json!([]))
+            .await
+        {
+            Ok(v) => v
+                .as_str()
+                .and_then(parse_hex_quantity)
+                .unwrap_or(1_500_000_000),
+            Err(_) => 1_500_000_000,
+        };
+        let max_fee = base_fee.saturating_mul(2).saturating_add(priority);
+
+        Ok(json!({
+            "network": network,
+            "chain_id": chain_id,
+            "nonce": nonce,
+            "gas": gas,
+            "base_fee_per_gas": base_fee,
+            "max_priority_fee_per_gas": priority,
+            "max_fee_per_gas": max_fee,
+        }))
+    }
+
+    /// Relay an ALREADY-SIGNED raw transaction through the mesh. The engine
+    /// receives a signed RLP blob it cannot modify or forge — the signature
+    /// was made in the wallet's keystore, so the non-custodial invariant is
+    /// byte-for-byte intact: the engine relays bytes, never intent.
+    pub async fn tx_broadcast_raw(&self, network: &str, raw_tx: &str) -> ApiResult<String> {
+        if !self.has_network(network) {
+            return Err(AppError::unavailable(format!(
+                "network '{network}' is known but has no RPC configured"
+            )));
+        }
+        let hash = self
+            .rpc(network, "eth_sendRawTransaction", json!([raw_tx]))
+            .await?;
+        hash.as_str()
+            .map(str::to_string)
+            .ok_or_else(|| AppError::upstream("eth_sendRawTransaction returned a non-string"))
+    }
+
     /// Transaction + receipt + confirmation depth for one hash — the building
     /// block of autonomous tier activation (payment proofs). The receipt is
     /// `None` while the transaction is known but still pending in the mempool.
