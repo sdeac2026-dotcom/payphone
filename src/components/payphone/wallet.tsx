@@ -852,6 +852,9 @@ function WalletMain({ prefill, onChanged }: { prefill?: WalletPrefill; onChanged
         </CardContent>
       </Card>
 
+      {/* Delegate — the earning autopilot dialog (one engine scan, local signing) */}
+      <DelegateDialog open={delegateOpen} onOpenChange={setDelegateOpen} />
+
       {/* earn & governance — stake, lend, vote; same local keystore signing */}
       <div id="wallet-earn" className="scroll-mt-4">
         <EarnPanel chain={chain} onChanged={loadBalances} />
