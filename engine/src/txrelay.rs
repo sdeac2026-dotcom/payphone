@@ -70,6 +70,20 @@ fn validate_raw(raw: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The mesh separates transport failures ("rpc … failed via host",
+/// "rpc … HTTP 429 …" → gateway trouble, engine maps to 5xx) from CHAIN
+/// verdicts ("rpc error: <the node's own answer>" → currently 502).
+/// A chain verdict — insufficient funds, nonce too low, execution
+/// reverted — is a real ANSWER about this exact transaction, not an
+/// outage. Map it to 4xx so the console surfaces it honestly instead of
+/// retrying the whole flow through browser gateways.
+fn surface_chain_verdict(e: AppError) -> AppError {
+    match e.message.strip_prefix("rpc error: ") {
+        Some(verdict) => AppError::bad_request(format!("the chain rejected the transaction: {verdict}")),
+        None => e,
+    }
+}
+
 async fn tx_prepare(State(state): Ctx, body: axum::body::Bytes) -> ApiResult<Response> {
     guard(&state, "tx-prepare")?;
     let req: PrepareReq = parse_body(&body)?;
@@ -79,7 +93,8 @@ async fn tx_prepare(State(state): Ctx, body: axum::body::Bytes) -> ApiResult<Res
         .ok_or_else(|| AppError::unavailable("no EVM RPC configured"))?;
     let mut payload = evm
         .tx_prepare(&req.network, &req.from, &req.to, req.data.as_deref(), req.value.as_deref())
-        .await?;
+        .await
+        .map_err(surface_chain_verdict)?;
     if let Some(obj) = payload.as_object_mut() {
         obj.insert(
             "note".to_string(),
@@ -97,7 +112,10 @@ async fn tx_broadcast(State(state): Ctx, body: axum::body::Bytes) -> ApiResult<R
         .evm
         .as_ref()
         .ok_or_else(|| AppError::unavailable("no EVM RPC configured"))?;
-    let hash = evm.tx_broadcast_raw(&req.network, &req.raw_tx).await?;
+    let hash = evm
+        .tx_broadcast_raw(&req.network, &req.raw_tx)
+        .await
+        .map_err(surface_chain_verdict)?;
     Ok(ok(json!({
         "hash": hash,
         "network": req.network,
@@ -117,6 +135,27 @@ mod tests {
         // 64 hex chars of plausible signature-bearing RLP payload.
         let ok_tx = "0x".to_string() + &"a9".repeat(48);
         assert!(validate_raw(&ok_tx).is_ok());
+    }
+
+    #[test]
+    fn chain_verdicts_become_honest_4xx() {
+        let funds = AppError::upstream(
+            "rpc error: Insufficient funds for gas * price + value: have 0 want 5909417430001",
+        );
+        let mapped = surface_chain_verdict(funds);
+        assert_eq!(mapped.status, axum::http::StatusCode::BAD_REQUEST);
+        assert!(mapped.message.contains("Insufficient funds"));
+
+        let reverted = surface_chain_verdict(AppError::upstream(
+            "rpc error: execution reverted: not enough stETH",
+        ));
+        assert_eq!(reverted.status, axum::http::StatusCode::BAD_REQUEST);
+
+        // Transport trouble stays a 5xx — the console's signal to fall back.
+        let transport = surface_chain_verdict(AppError::upstream(
+            "rpc eth_sendRawTransaction failed via some-gateway: connection reset",
+        ));
+        assert_eq!(transport.status, axum::http::StatusCode::BAD_GATEWAY);
     }
 
     #[test]

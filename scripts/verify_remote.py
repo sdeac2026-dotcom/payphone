@@ -634,6 +634,28 @@ _bcode = _tx_broadcast_garbage()
 check("tx broadcast rejects garbage blobs before touching the mesh (400)",
       _bcode == 400, f"code={_bcode}")
 
+# [61] priority-tip floor: some gateways answer maxPriorityFeePerGas with 0x0;
+# the engine floors the tip at 0.1 gwei so transactions cannot sit in the
+# mempool forever behind a zero tip.
+check("tx prepare floors the priority tip at 0.1 gwei",
+      int(_prep.get("max_priority_fee_per_gas", 0)) >= 100_000_000,
+      f"max_priority_fee_per_gas={_prep.get('max_priority_fee_per_gas')}")
+
+# [62] end-to-end broadcast proof: relay a REAL locally-signed (canned)
+# transaction whose nonce is permanently stale — every node answers with a
+# chain verdict ("nonce too low"), the engine maps verdicts to 400. A 502
+# here would mean gateways refuse the relay; a 200 would mean we spent money.
+CANNED_RAW = "0x02f86a01018405f5e10084b2d05e0082520894d8da6bf26964af9d7eed9e03e53415d37aa960450180c001a0d192a73951958702a6de81038a48ccc9d3e892fee04c54ed501e4f31d8bc3b5aa06cb3af056c4d9a3e0fc6407efbca622f7fb8f73a4ede8c419895e302e9b7d176"
+
+def _tx_broadcast_canned():
+    code, body = post("/api/v1/tx/broadcast", {"network": "ethereum", "raw_tx": CANNED_RAW}, timeout=60)
+    return code, (body.get("error") or {}).get("message", "") if isinstance(body, dict) else ""
+
+_c2code, _c2msg = _tx_broadcast_canned()
+check("tx broadcast relays to real nodes — stale-nonce verdict surfaces as 400",
+      _c2code == 400 and _c2msg != "",
+      f"code={_c2code} msg={_c2msg[:80]}")
+
 print()
 print(f"RESULT: {len(passed)} passed, {len(failed)} failed")
 if failed:

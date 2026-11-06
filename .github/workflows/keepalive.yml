@@ -1,0 +1,39 @@
+# Keep-alive for the free-tier deployment.
+#
+# Render's free plan sleeps a service after ~15 minutes idle; the next
+# request then waits up to ~50s for the cold start. That cold start is the
+# "every button is broken for a minute" experience this workflow exists to
+# prevent: every 10 minutes a scheduled ping wakes (or keeps warm) the
+# engine's aggregate health endpoint. Non-fatal by design — if the host is
+# down for real, this must NOT spam failure emails; the deployment
+# verifier's checks are the authoritative alarm.
+#
+# Note: GitHub disables scheduled workflows after 60 days of no repo
+# activity — normal for this repo (regular commits), and harmless if it
+# ever pauses: the console already retries engine wake-ups with a 45s
+# first-attempt timeout (api.ts WAKE_TIMEOUT_MS).
+
+name: keepalive
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch: {}
+
+permissions: {}
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping engine aggregate health (wakes the free-tier service)
+        env:
+          URL: https://payphone-div0.onrender.com
+        run: |
+          for attempt in 1 2 3; do
+            code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 90 "$URL/api/health" || true)
+            echo "attempt $attempt: HTTP $code"
+            if [ "$code" = "200" ]; then exit 0; fi
+            sleep 20
+          done
+          echo "engine did not answer 200 in 3 attempts — keeping the job green (verifier is the alarm)"

@@ -99,13 +99,13 @@ export function EarnPanel({ chain, onChanged }: { chain: WalletChain; onChanged:
   useEffect(() => { loadPositions(); }, [loadPositions]);
 
   const loadPower = useCallback(async () => {
-    if (!gov || !addr || chain.name !== gov.network) { setPower(null); return; }
+    if (!gov || !addr) { setPower(null); return; }
     try {
       setPower(await governancePower(gov.id, addr));
     } catch {
       setPower(null);
     }
-  }, [gov, addr, chain.name]);
+  }, [gov, addr]);
 
   useEffect(() => { loadPower(); }, [loadPower]);
 
@@ -173,14 +173,8 @@ export function EarnPanel({ chain, onChanged }: { chain: WalletChain; onChanged:
   const roadmap = opps?.filter((o) => o.status === "roadmap") ?? [];
 
   function actionFor(o: EarnOpportunity) {
-    const onNetwork = chain.name === o.network;
-    if (!onNetwork) {
-      return (
-        <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
-          <ArrowRightLeft className="h-3.5 w-3.5" /> Lives on {o.network} — switch the wallet network (top selector) to act.
-        </p>
-      );
-    }
+    // The flow resolves the opportunity's own chain (see earn.ts), so the
+    // controls render no matter which network the console selector is on.
     if (o.id === "lido-steth-ethereum") {
       return (
         <div className="flex gap-2">
@@ -298,20 +292,17 @@ export function EarnPanel({ chain, onChanged }: { chain: WalletChain; onChanged:
             </div>
             <p className="text-sm font-medium">{gov.label}</p>
             <p className="text-xs leading-relaxed text-muted-foreground">{gov.description}</p>
-            {chain.name !== gov.network && (
-              <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                <ArrowRightLeft className="h-3.5 w-3.5" /> Governance lives on {gov.network} — switch the wallet network to act.
-              </p>
-            )}
-            {power && chain.name === gov.network && (
+            <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <ArrowRightLeft className="h-3.5 w-3.5" /> Governance lives on {gov.network} — actions sign on that chain directly; the selector is a view choice.
+            </p>
+            {power && (
               <div className="rounded-md border bg-muted/40 px-3 py-2 text-xs space-y-1">
                 <div className="flex justify-between"><span className="text-muted-foreground">{gov.asset} balance</span><span className="font-mono">{power.token_balance}</span></div>
                 <div className="flex justify-between"><span className="text-muted-foreground">Delegated voting power (block {power.measured_at_block})</span><span className="font-mono">{power.votes}</span></div>
                 {power.votes === "0" && <p className="text-amber-700">Voting power is 0 — delegate below first (to yourself is fine).</p>}
               </div>
             )}
-            {chain.name === gov.network && (
-              <>
+            <div className="space-y-3">
                 <div className="flex gap-2">
                   <Input placeholder="Delegate to (0x… — your own address is fine)" value={delegatee} onChange={(e) => setDelegatee(e.target.value)} />
                   <Button variant="outline" disabled={!delegatee.trim() || busy !== null} onClick={doDelegate}>
@@ -337,8 +328,7 @@ export function EarnPanel({ chain, onChanged }: { chain: WalletChain; onChanged:
                     <li key={r} className="flex gap-1.5 text-amber-700"><AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />{r}</li>
                   ))}
                 </ul>
-              </>
-            )}
+            </div>
           </div>
         )}
 

@@ -789,7 +789,7 @@ export interface SendResult {
   explorerUrl?: string;
 }
 
-function requireChain(network: string): WalletChain {
+export function requireChain(network: string): WalletChain {
   const c = walletChain(network);
   if (!c) throw new Error(`Wallet does not support the "${network}" network yet (EVM only — BTC/SOL/TRON pending).`);
   return c;

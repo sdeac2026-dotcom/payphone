@@ -617,6 +617,11 @@ impl EvmAdapter {
                 .unwrap_or(1_500_000_000),
             Err(_) => 1_500_000_000,
         };
+        // Some gateways answer eth_maxPriorityFeePerGas with 0x0 — a zero
+        // tip lets a transaction sit in the mempool indefinitely on busy
+        // chains. Floor the tip at 0.1 gwei: it is an upper bound the
+        // payer offers, trivially affordable on every mesh chain.
+        let priority = priority.max(100_000_000);
         let max_fee = base_fee.saturating_mul(2).saturating_add(priority);
 
         Ok(json!({

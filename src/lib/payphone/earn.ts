@@ -27,7 +27,7 @@ import {
   type Address,
 } from "viem";
 import { api, ApiError, type EarnOpportunity } from "./api";
-import { clients, gasMessage, type WalletChain } from "./wallet";
+import { clients, gasMessage, requireChain, type WalletChain } from "./wallet";
 
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as const;
 
@@ -249,12 +249,15 @@ export async function settleableToken(
   return { address: t.address as Address, decimals: t.decimals };
 }
 
-function requireNetwork(c: WalletChain, network: string): void {
-  if (c.name !== network) {
-    throw new Error(
-      `This opportunity lives on ${network} — switch the wallet to that network (top-right selector) and try again.`
-    );
-  }
+/**
+ * The flow resolves the opportunity's own chain from WALLET_CHAINS — the
+ * keystore account signs on whatever network the opportunity lives on, so
+ * the console's network selector can never dead-end a button with
+ * "switch the network and try again". The selector stays a VIEW choice
+ * (balances, positions); actions follow the opportunity.
+ */
+function chainFor(network: string): WalletChain {
+  return requireChain(network);
 }
 
 // ----------------------------------------------------------------- flows ----
@@ -263,8 +266,8 @@ function requireNetwork(c: WalletChain, network: string): void {
  * Stake ETH with Lido → stETH. ONE payable transaction
  * (`submit(referral)`); stETH lands immediately and rebases daily.
  */
-export async function stakeEthLido(c: WalletChain, amountEth: string): Promise<string> {
-  requireNetwork(c, "ethereum");
+export async function stakeEthLido(_selected: WalletChain, amountEth: string): Promise<string> {
+  const c = chainFor("ethereum");
   const data = encodeFunctionData({ abi: LIDO_ABI, functionName: "submit", args: [ZERO_ADDRESS] });
   return signAndBroadcast(c, EARN_CONTRACTS.lidoStETH, data, parseEther(amountEth.trim()));
 }
@@ -273,8 +276,8 @@ export async function stakeEthLido(c: WalletChain, amountEth: string): Promise<s
  * Wrap stETH → wstETH (non-rebasing). Two signed transactions:
  * exact-amount approve, then `wrap(uint256)`.
  */
-export async function wrapStETH(c: WalletChain, amountStEth: string): Promise<{ approve: string; wrap: string }> {
-  requireNetwork(c, "ethereum");
+export async function wrapStETH(_selected: WalletChain, amountStEth: string): Promise<{ approve: string; wrap: string }> {
+  const c = chainFor("ethereum");
   const qty = parseUnits(amountStEth.trim(), 18);
   const approve = await approveExact(c, EARN_CONTRACTS.lidoStETH, EARN_CONTRACTS.lidoWstETH, qty);
   const wrap = await signAndBroadcast(
@@ -290,8 +293,8 @@ export async function wrapStETH(c: WalletChain, amountStEth: string): Promise<{ 
  * Supply USDC to Aave V3 → aUSDC receipt. Two signed transactions:
  * exact-amount approve, then `supply(asset, amount, onBehalfOf, 0)`.
  */
-export async function supplyAaveUsdc(c: WalletChain, amountUsdc: string): Promise<{ approve: string; supply: string }> {
-  requireNetwork(c, "ethereum");
+export async function supplyAaveUsdc(_selected: WalletChain, amountUsdc: string): Promise<{ approve: string; supply: string }> {
+  const c = chainFor("ethereum");
   const usdc = await settleableToken("ethereum", "USDC");
   const qty = parseUnits(amountUsdc.trim(), usdc.decimals);
   const { walletClient } = clients(c);
@@ -315,12 +318,12 @@ export async function supplyAaveUsdc(c: WalletChain, amountUsdc: string): Promis
  * engine builds the calldata (registry-verified token); the wallet signs.
  */
 export async function governanceDelegate(
-  c: WalletChain,
+  _selected: WalletChain,
   opportunityId: string,
   delegatee: string
 ): Promise<string> {
   const tx = await api.governanceDelegateCalldata({ opportunity: opportunityId, delegatee: delegatee.trim() });
-  requireNetwork(c, tx.network);
+  const c = chainFor(tx.network);
   return signAndBroadcast(c, tx.to as Address, tx.data as `0x${string}`, 0n);
 }
 
@@ -329,13 +332,13 @@ export async function governanceDelegate(
  * (0 = against, 1 = for, 2 = abstain). Engine builds; wallet signs.
  */
 export async function governanceVote(
-  c: WalletChain,
+  _selected: WalletChain,
   opportunityId: string,
   proposalId: string,
   support: 0 | 1 | 2
 ): Promise<string> {
   const tx = await api.governanceVoteCalldata({ opportunity: opportunityId, proposal_id: proposalId.trim(), support });
-  requireNetwork(c, tx.network);
+  const c = chainFor(tx.network);
   return signAndBroadcast(c, tx.to as Address, tx.data as `0x${string}`, 0n);
 }
 
