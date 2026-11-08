@@ -254,6 +254,7 @@ export async function walletImportMnemonic(mnemonic: string, passphrase: string)
   const words = mnemonic.trim().split(/\s+/).join(" ");
   if (words.split(" ").length < 12) throw new Error("That doesn't look like a mnemonic phrase (need 12+ words).");
   const account = mnemonicToAccount(words);
+  unlockedAccount = account; // replaces any stale in-memory account — walletAddress() must match the keystore just saved
   const enc = await encryptSecret(words, passphrase);
   keystoreSave({ v: 1, kind: "mnemonic", address: account.address, createdAt: Date.now(), ...enc });
   return account.address;
@@ -263,6 +264,7 @@ export async function walletImportMnemonic(mnemonic: string, passphrase: string)
 export async function walletImportPrivateKey(pk: string, passphrase: string): Promise<string> {
   const key = pk.trim().toLowerCase().startsWith("0x") ? pk.trim() : `0x${pk.trim()}`;
   const account = privateKeyToAccount(key as `0x${string}`);
+  unlockedAccount = account; // replaces any stale in-memory account — walletAddress() must match the keystore just saved
   const enc = await encryptSecret(key, passphrase);
   keystoreSave({ v: 1, kind: "key", address: account.address, createdAt: Date.now(), ...enc });
   return account.address;
@@ -300,6 +302,15 @@ export async function walletUnlock(passphrase: string): Promise<string> {
     ks.kind === "mnemonic"
       ? mnemonicToAccount(plain.trim())
       : privateKeyToAccount(plain.trim() as `0x${string}`);
+  // The passphrase just authenticated the secret, so the derived address is
+  // ground truth. If the keystore's address label disagrees (older bug,
+  // edited backup, partial import), correct it — otherwise the unlock
+  // screen, the activity radar (walletAddressStored) and the wallet card
+  // (walletAddress) would show two different addresses for one wallet.
+  if (ks.address.toLowerCase() !== unlockedAccount.address.toLowerCase()) {
+    console.warn(`[wallet] keystore label ${ks.address} != derived ${unlockedAccount.address} — correcting label`);
+    keystoreSave({ ...ks, address: unlockedAccount.address });
+  }
   return unlockedAccount.address;
 }
 
@@ -384,17 +395,31 @@ export async function walletRestoreFromBackup(file: unknown, passphrase: string)
     throw new Error("That file is not a PayPhone wallet backup.");
   }
   const key = await deriveKey(passphrase, fromHex(ks.salt), ks.iterations);
+  let plain: string;
   try {
-    await crypto.subtle.decrypt(
-      { name: "AES-GCM", iv: fromHex(ks.iv) as BufferSource },
-      key,
-      fromHex(ks.ct) as BufferSource
+    plain = new TextDecoder().decode(
+      await crypto.subtle.decrypt(
+        { name: "AES-GCM", iv: fromHex(ks.iv) as BufferSource },
+        key,
+        fromHex(ks.ct) as BufferSource
+      )
     );
   } catch {
     throw new Error("Wrong passphrase for this backup file.");
   }
-  keystoreSave(ks);
-  return ks.address;
+  // Restore from the SECRET, not from the label: the derived address is what
+  // the keys actually control. A backup with a stale address label would
+  // otherwise point receives at an address this keystore cannot spend from.
+  const account =
+    ks.kind === "mnemonic"
+      ? mnemonicToAccount(plain.trim())
+      : privateKeyToAccount(plain.trim() as `0x${string}`);
+  if (ks.address.toLowerCase() !== account.address.toLowerCase()) {
+    console.warn(`[wallet] backup label ${ks.address} != derived ${account.address} — correcting label`);
+  }
+  keystoreSave({ ...ks, address: account.address });
+  unlockedAccount = account;
+  return account.address;
 }
 
 // ------------------------------------------------------------- guardian ----

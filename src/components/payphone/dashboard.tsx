@@ -33,7 +33,7 @@ import {
   type WalletActivityAll,
 } from "@/lib/payphone/api";
 import type { EngineHealth, FeeSchedule, LocalInvoice } from "@/lib/payphone/types";
-import { walletAddressStored } from "@/lib/payphone/wallet";
+import { walletAddress, walletAddressStored } from "@/lib/payphone/wallet";
 import { CodeBlock, MonoValue, StatCard } from "./bits";
 
 const TIERS = ["free", "starter", "growth", "scale", "enterprise"] as const;
@@ -182,7 +182,7 @@ function merchantTierBps(tier: string): number {
 
 function Onboarding({ onDone }: { onDone: (m: MerchantSession) => void }) {
   const [tier, setTier] = useState<string>("growth");
-  const [wallet, setWallet] = useState("");
+  const [wallet, setWallet] = useState(walletAddressStored() ?? "");
   const [busy, setBusy] = useState(false);
   const [issued, setIssued] = useState<{ pk: string; sk: string } | null>(null);
   const [showSk, setShowSk] = useState(false);
@@ -673,7 +673,7 @@ function Invoices({
   const [net, setNet] = useState("auto"); // "auto" = asset catalog picks the venue
   const [description, setDescription] = useState("Pro plan — monthly");
   const [busy, setBusy] = useState(false);
-  const [lastCreated, setLastCreated] = useState<{ id: string; token: string; url: string } | null>(null);
+  const [lastCreated, setLastCreated] = useState<{ id: string; token: string; url: string; wallet: string } | null>(null);
   const { toast } = useToast();
 
   const assetEntry = assets.find((a) => a.symbol === asset);
@@ -770,7 +770,7 @@ function Invoices({
         created_at: Date.now(),
         status: "pending",
       });
-      setLastCreated({ id: d.invoice.id, token: d.token, url: d.payment_url });
+      setLastCreated({ id: d.invoice.id, token: d.token, url: d.payment_url, wallet: d.invoice.address });
       toast({
         title: "Invoice created",
         description: `${asset} settles on ${d.invoice.chain}/${d.invoice.network} · fee ${usd(d.fee.fee_total_minor)} (${(d.fee.bps / 100).toFixed(2)}%)`,
@@ -840,6 +840,22 @@ function Invoices({
                 : "Default routing comes from the asset catalog."}
             </p>
           </div>
+          {merchant.wallet && (
+            <div className="flex flex-wrap items-center gap-2 rounded-lg border bg-muted/40 p-2.5 text-xs">
+              <span className="text-muted-foreground shrink-0">Funds land on</span>
+              <span className="font-mono">{shortHash(merchant.wallet, 12)}</span>
+              {(() => {
+                const mine = walletAddress();
+                if (!mine || mine.toLowerCase() === merchant.wallet.toLowerCase()) return null;
+                return (
+                  <Button size="sm" variant="outline" className="h-7 shrink-0 text-[11px]"
+                    onClick={() => store.patch({ wallet: mine })}>
+                    Use my PayPhone wallet
+                  </Button>
+                );
+              })()}
+            </div>
+          )}
           {isReal ? (
             <div className="flex items-start gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-2.5 text-xs text-emerald-700 dark:text-emerald-400">
               <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0" />
@@ -873,6 +889,9 @@ function Invoices({
             <div className="space-y-2 rounded-lg border border-primary/40 bg-primary/5 p-3 text-sm">
               <div className="font-medium text-primary">Invoice ready</div>
               <MonoValue value={lastCreated.url} display={`#/pay/${shortHash(lastCreated.id, 6)}…`} />
+              <p className="text-[11px] text-muted-foreground">
+                Funds land on <span className="font-mono">{shortHash(lastCreated.wallet, 12)}</span> — your merchant payout wallet.
+              </p>
               <div className="flex gap-2">
                 <Button size="sm" className="flex-1 gap-1.5" onClick={() => onOpenCheckout(lastCreated.id, lastCreated.token)}>
                   <ExternalLink className="h-3.5 w-3.5" /> Open checkout
