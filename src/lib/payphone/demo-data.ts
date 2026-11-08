@@ -309,8 +309,8 @@ export const DEMO_NETWORKS: DemoNetwork[] = [
     "explorer_tx": "https://bscscan.com/tx/",
     "tokens": {
       "USDT": {
-        "address": "0x524bC91dc82d6B90eF29F76A3ECAAbaffFD490Bc",
-        "decimals": 6
+        "address": "0x55d398326f99059fF775485246999027B3197955",
+        "decimals": 18
       },
       "USDC": {
         "address": "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d",

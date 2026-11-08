@@ -226,7 +226,12 @@ pub const NETWORKS: &[NetworkSpec] = &[
         ],
         explorer_tx: "https://bscscan.com/tx/",
         tokens: tokens![
-            "USDT"  => ("0x524bC91dc82d6B90eF29F76A3ECAAbaffFD490Bc", 6),
+            // THE BEP-20 USDT everyone uses: Binance-Peg BSC-USD
+            // (0x55d3…7955, 18 decimals, ~9.2B supply, bscscan 1.7B txs).
+            // The old 0x524b…6-decimals peg has ~298K units of supply —
+            // pointing there means receives show a 0 balance. Verified on
+            // live RPC (symbol/decimals/totalSupply) 2026-11-08.
+            "USDT"  => ("0x55d398326f99059fF775485246999027B3197955", 18),
             "USDC"  => ("0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d", 18),
             "DAI"   => ("0x1AF3F329e8BE154074D8769D1FFa4eE058B1DBc3", 18),
             "ETH"   => ("0x2170Ed0880ac9A755fd29B2688956BD959F933F8", 18),
@@ -497,6 +502,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn bsc_usdt_is_the_canonical_binance_peg() {
+        // Receiving "USDT on BSC" must mean the token every exchange and
+        // wallet uses. A wrong contract here silently shows 0 balances on
+        // real receives — pin the canonical address and its decimals.
+        let bsc = find("bsc").unwrap();
+        let usdt = bsc.tokens.iter().find(|t| t.symbol == "USDT").unwrap();
+        assert_eq!(usdt.address, "0x55d398326f99059fF775485246999027B3197955");
+        assert_eq!(usdt.decimals, 18);
+    }
+
+    #[test]
     fn all_eight_mainnets_registered() {
         assert_eq!(NETWORKS.len(), 8);
         assert_eq!(find("base").unwrap().chain_id, 8453);
@@ -553,9 +569,14 @@ mod tests {
         // Round-trip by address.
         let by_addr = token_by_address("polygon", "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359").unwrap();
         assert_eq!(by_addr.symbol, "USDC");
-        // BSC USDT is 6dp at the verified Tether contract…
-        assert_eq!(resolve_token("bsc", "USDT").unwrap().decimals, 6);
-        // …while BSC USDC is 18dp — decimals are per-network, not per-symbol.
+        // BSC USDT is the canonical Binance-Peg BSC-USD (0x55d3…7955) —
+        // 18dp, unlike mainnet USDT's 6dp. Verified against live RPC
+        // (symbol/decimals/totalSupply 2026-11-08): the old 0x524b… 6dp
+        // entry was a near-dead token with ~298K units of supply.
+        assert_eq!(resolve_token("bsc", "USDT").unwrap().decimals, 18);
+        // Decimals are per-network, not per-symbol: USDC is 6dp on
+        // ethereum but 18dp on BSC.
+        assert_eq!(resolve_token("ethereum", "USDC").unwrap().decimals, 6);
         assert_eq!(resolve_token("bsc", "USDC").unwrap().decimals, 18);
         // Asset that exists on one network but not another.
         assert!(resolve_token("arbitrum", "cbBTC").is_none());
